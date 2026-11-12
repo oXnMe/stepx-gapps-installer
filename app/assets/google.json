@@ -1,0 +1,33 @@
+{
+  "name": "MindTheGapps-16.0.0-arm64-20261021_084306.zip",
+  "url": "https://github.com/MindTheGapps/16.0.0-arm64/releases/download/MindTheGapps-16.0.0-arm64-20261021_084306/MindTheGapps-16.0.0-arm64-20261021_084306.zip",
+  "size": 523923262,
+  "downloadBytes": 139701131,
+  "bytes": 289238420,
+  "apks": [
+    {
+      "pkg": "com.google.android.gsf",
+      "label": "GSF",
+      "path": "system/system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk",
+      "packed": 2109459,
+      "bytes": 4387851,
+      "sha256": "41c0d547ac1466e87ccf783e36192cacbda0f6010128327a2503b4330dc8b534"
+    },
+    {
+      "pkg": "com.google.android.gms",
+      "label": "GMS",
+      "path": "system/product/priv-app/GmsCore/GmsCore.apk",
+      "packed": 104419956,
+      "bytes": 196153215,
+      "sha256": "7e8da09f20d490af64f3432ffa0b82fd035546e54bc6c7b9ac6650edbe8533b3"
+    },
+    {
+      "pkg": "com.android.vending",
+      "label": "Play",
+      "path": "system/product/priv-app/Phonesky/Phonesky.apk",
+      "packed": 33171716,
+      "bytes": 88697354,
+      "sha256": "8ee254546102d2a6accf269abe62869c54b098e1ba54fd538a47d2f79b9991d2"
+    }
+  ]
+}

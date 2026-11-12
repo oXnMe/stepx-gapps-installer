@@ -1,0 +1,76 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # 只有打 tag 时用到（传 Release 资产）
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # 只用 SDK 的 build-tools 与一个 platform，其余交给 build.sh。
+      # build-tools 优先 36；取不到就退回 runner 上已有的版本（脚本自己挑最新的）。
+      - name: Install SDK packages
+        run: |
+          SDKMAN="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMAN" --licenses > /dev/null || true
+          "$SDKMAN" "platforms;android-36"
+          "$SDKMAN" "build-tools;36.0.0" || echo "build-tools 36 取不到，用 runner 自带的"
+
+      # 签名 key 不放在仓库里，构建时从 secrets 解出来：
+      #   KEYSTORE_B64   release.jks 的 base64（base64 -i release.jks | pbcopy）
+      #   KS_PASS        store 口令
+      #   KS_KEYPASS     可选，key 口令与 store 不同时才用
+      #   KS_ALIAS       可选，默认 gapps
+      # 没配 KEYSTORE_B64 时仍然出包，但用临时 key 签，盖不掉已装的版本。
+      - name: Decode keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            mkdir -p keystore
+            printf '%s' "$KEYSTORE_B64" | base64 -d > keystore/release.jks
+          else
+            echo "::warning::没配 KEYSTORE_B64，本次用临时签名，产物无法覆盖升级已装版本"
+          fi
+
+      - name: Build APK
+        env:
+          KS_PASS: ${{ secrets.KS_PASS }}
+          KS_KEYPASS: ${{ secrets.KS_KEYPASS }}
+          KS_ALIAS: ${{ secrets.KS_ALIAS }}
+        run: |
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Show result
+        run: |
+          ls -l out/
+          "$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/apksigner" \
+            verify --print-certs out/stepx-gapps-installer.apk | head -5
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stepx-gapps-installer
+          path: out/stepx-gapps-installer.apk
+          if-no-files-found: error
+
+      # 打 v* tag 时才发 Release，平时只留 artifact
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/stepx-gapps-installer.apk

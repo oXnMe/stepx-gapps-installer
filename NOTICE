@@ -1,0 +1,54 @@
+StepX GApps 安装器
+Copyright (C) 2026 the stepx-gapps-installer contributors
+Licensed under the GNU Affero General Public License v3.0 only (see LICENSE).
+
+===============================================================================
+一、注入链路的来源
+===============================================================================
+
+本项目的「注入」能力来自社区项目：
+
+    stepx-companion  ——  https://github.com/xydzf520/stepx
+    许可：AGPL-3.0-only
+    路径基准：该仓库根目录下的 module/
+
+按来源分三类，均在 app/assets/payload/ 下：
+
+  原样取自上游
+    inject.py                 ptrace 进入 system_server 执行载荷，改 PackageManager
+                              的内存态权限位。30,229 B，sha256 27930528…
+                              与应用内「关于」页显示的一致。
+
+  在上游基础上修改（衍生作品，仍按 AGPL-3.0-only）
+    boot.py                   上游 module/boot.py。改动：boot_id 去重、flock、
+                              fork → chroot → 写 /proc/self/attr/current，
+                              以及只读探测槽位。
+    boot-adapter.py           上游 module/launcher.py。改动：父进程 execv 原厂
+                              launcher，子进程 setsid 后拉起 boot.py；抽出常量、
+                              补建状态目录、失败回落原厂实现。
+
+  本项目自有
+    deploy.py  deploy-run.py  repair.py  recover.py  read-last.py  stepx-fix.sh
+    以及 app/src/ 下的全部 Java 代码。
+
+===============================================================================
+二、随附的应用
+===============================================================================
+
+本应用**不再**内置、也不再分发 Google 的任何二进制：
+
+  - GSF（com.google.android.gsf）、GMS（com.google.android.gms）、
+    Play 商店（com.android.vending）的版权归 Google LLC。
+  - 运行时可从 MindTheGapps（https://github.com/MindTheGapps）的 release zip
+    中取用这三个 APK；本应用只按原厂签名取用，不重打包、不重签名。
+  - 也可由用户自行从 APKMirror 等处下载后通过「选包」导入。
+  - MindTheGapps 自身的许可与声明见其仓库。
+
+===============================================================================
+三、第三方库
+===============================================================================
+
+  Shizuku api / provider 13.1.5
+    Copyright (C) RikkaApps
+    Apache License 2.0 —— https://github.com/RikkaApps/Shizuku-API
+    以 aar 形式在构建时从 Maven Central 拉取，随 APK 一起打包进 dex。
