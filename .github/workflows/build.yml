@@ -73,4 +73,10 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          name: ${{ github.ref_name }}
+          body: |
+            StepX Neo（PZ261A / Android 16 / StepOS）用的 GApps 三件套安装器。
+
+            装 GSF / GMS / Play，并把特权权限注入 system_server，让 Play 能登录、下载、更新。
+            需要 Shizuku，全程在手机上完成。用法与限制见 README。
           files: out/stepx-gapps-installer.apk
