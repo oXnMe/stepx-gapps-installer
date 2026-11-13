@@ -8,7 +8,7 @@
 #
 # 能处理五类故障：
 #   A. 注入的特权权限被权限重算清掉
-#      Play 的 MANAGE_USERS / GMS 的 INTERACT_ACROSS_USERS 丢失
+#      Play / GMS 的 MANAGE_USERS 丢失（只有注入会给，一撤就掉）
 #      -> 重启 openclaw_env 触发 boot.py 重注入，约 80 秒
 #   B. GMS 处于 AMS 幽灵态（进程已死，但 ProcessRecord 卡在旧 pid 上）
 #      - 表现为 Play 里 GMS 起不来、报 "launching app became null"
@@ -73,8 +73,11 @@ STATE="${STEPX_STATE:-/sdcard/stepx-fix.state}"
 
 # ---------------------------------- 检测 ----------------------------------
 
+# 判据用 MANAGE_USERS，两个包都一样：它只有注入会给，PMS 一重算就掉。
+# 不要用 INTERACT_ACROSS_USERS —— 本 ROM 默认就授予，注入丢了它照样 granted=true，
+# 拿它当判据会永远显示「正常」，然后既不重注入也不报错（v0.25 之前踩过这个坑）。
 perm_play() { dumpsys package $PLAY 2>/dev/null | grep -q "MANAGE_USERS: granted=true"; }
-perm_gms()  { dumpsys package $GMS  2>/dev/null | grep -q "INTERACT_ACROSS_USERS: granted=true"; }
+perm_gms()  { dumpsys package $GMS  2>/dev/null | grep -q "MANAGE_USERS: granted=true"; }
 gms_alive() { [ -n "$(pidof $GMS 2>/dev/null)" ]; }
 play_alive(){ [ -n "$(pidof $PLAY 2>/dev/null)" ]; }
 
@@ -166,8 +169,8 @@ show() {
     if pkg_disabled $GSF; then echo "  GSF 启用  : 被禁用（$(pkg_enabled_state $GSF)）"; else echo "  GSF 启用  : 正常（$(pkg_enabled_state $GSF)）"; fi
     if pkg_disabled $GMS; then echo "  GMS 启用  : 被禁用（$(pkg_enabled_state $GMS)）"; else echo "  GMS 启用  : 正常（$(pkg_enabled_state $GMS)）"; fi
     if pkg_disabled $PLAY;then echo "  Play 启用 : 被禁用（$(pkg_enabled_state $PLAY)）"; else echo "  Play 启用 : 正常（$(pkg_enabled_state $PLAY)）"; fi
-    if perm_play; then echo "  Play 权限 : 正常"; else echo "  Play 权限 : 缺失"; fi
-    if perm_gms;  then echo "  GMS 权限  : 正常"; else echo "  GMS 权限  : 缺失"; fi
+    if perm_play; then echo "  Play 权限 : 正常"; else echo "  Play 权限 : 缺失（MANAGE_USERS）"; fi
+    if perm_gms;  then echo "  GMS 权限  : 正常"; else echo "  GMS 权限  : 缺失（MANAGE_USERS）"; fi
     if gms_alive; then echo "  GMS 进程  : 在（$(pidof $GMS)）"; else echo "  GMS 进程  : 不在"; fi
     if ! gms_alive && su_gate_broken; then
         echo "  GMS 单用户: 被拦（FLAG_SINGLE_USER，见 README §8.7）"
@@ -425,10 +428,13 @@ fi
 # --- A′. FLAG_SINGLE_USER 门禁（必须先做，且必须在重注入之前） ---
 # 顺序有讲究：pm grant 会触发权限重算、抹掉注入，所以要放在 recover_perm 前面，
 # 让随后的重注入把 153 项补回来。
+# 这条权限在本 ROM 默认就授予，所以 pm grant 经常直接返回「not a changeable
+# permission type」—— 那是正常的，不是失败。真正让 attach 过去的是重注入
+# 把 GMS 标成 privileged，所以这里只需要把 NEED 立起来。
 if ! gms_alive && su_gate_broken; then
     echo ""
-    echo "检测到 GMS 被 FLAG_SINGLE_USER 拦在 attach 阶段，补授 INTERACT_ACROSS_USERS..."
-    pm grant $GMS android.permission.INTERACT_ACROSS_USERS && echo "  已授予" || echo "  授予失败"
+    echo "GMS 被 FLAG_SINGLE_USER 拦在 attach 阶段 —— 只能重注入（pm grant 改不动这条权限）"
+    pm grant $GMS android.permission.INTERACT_ACROSS_USERS >/dev/null 2>&1
     NEED=1
 fi
 

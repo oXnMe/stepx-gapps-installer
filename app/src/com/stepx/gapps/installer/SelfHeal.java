@@ -13,13 +13,15 @@ import java.util.regex.Pattern;
  *   - 脚本里那段 80 秒的盲等，移植后可以改成轮询权限，通常 40–60 秒就能进下一步；
  *   - 用户在 app 里读完日志就能看到结论，不用再去翻终端。
  *
- * 但**语义必须和脚本一致**，四条要点，改任何一条都要同步改脚本：
+ * 但**语义必须和脚本一致**，五条要点，改任何一条都要同步改脚本：
  *   1. G 段（appops）故意不置 NEED —— appops 不触发 PMS 权限重算，不该白等一次重注入
  *   2. 失败分支不推进版本记账 —— 版本变了但没救回来时，下次要再强制一次
  *   3. 顺序固定：禁用包 → FLAG_SINGLE_USER → 权限 → appops → 重注入 → GMS 重启
  *   4. 退出码 0–6 含义不变，见下方常量
+ *   5. 权限判据只认 MANAGE_USERS（两个包都是）—— 别用 INTERACT_ACROSS_USERS，
+ *      本 ROM 默认授予，判不出注入在不在。v0.25 改过这里却漏了脚本，隔了 13 天才发现
  *
- * 对应脚本：stepx-play-trio/scripts/stepx-fix.sh（那边是唯一事实来源）
+ * 对应脚本：app/assets/payload/stepx-fix.sh（同一条判据的另一份实现）
  */
 final class SelfHeal {
 

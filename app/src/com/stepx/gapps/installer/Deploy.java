@@ -351,7 +351,8 @@ final class Deploy {
                 r.line("  " + s, Reporter.WARN);
                 continue;
             }
-            if (s.startsWith("put  ") || s.startsWith("backup ") || s.startsWith("mkdir ")) {
+            if (s.startsWith("put  ") || s.startsWith("backup ") || s.startsWith("archive ")
+                    || s.startsWith("mkdir ")) {
                 r.line("  " + s, Reporter.OK);
                 continue;
             }
