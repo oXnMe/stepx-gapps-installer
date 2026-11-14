@@ -41,6 +41,9 @@ import java.util.zip.Inflater;
  *  3. 这批文件是「临时」不是「常驻」：装完就清（{@link #clear}），
  *     进程重启时再扫一遍残留（见 MainActivity#sweepCaches）。
  *
+ * 通道可换：GitHub 直连取不到字节时，整段 URL 拼到 {@link #PROXY} 后面再走一遍。
+ * 反代只搬字节，第 1 条照样把关，所以「经谁的手」不影响包的可信度。
+ *
  * 幂等靠「盖章」：文件落盘时在旁边写 .stamp（内容就是 sha256）。
  * 同一个进程里连点两次不必重下 133MB；跨进程不再指望缓存 ——
  * 那份文件除了这一次安装没有别的用途。
@@ -52,10 +55,21 @@ final class Trio {
     /** 清单：URL、整包大小、三个条目的 zip 内路径与 sha256。构建时打进 assets。 */
     private static final String SPEC = "google.json";
 
+    /**
+     * 加速通道。GitHub 直连拿不到字节时经它中转，拼法是「反代前缀 + 完整原 URL」。
+     *
+     * 它只转发，不改变字节 —— 落盘前照样按清单里的 sha256 校验，所以走不走它
+     * 只影响通不通，不影响包的可信度。也正因为它是个第三方，默认不走，由用户点选。
+     */
+    static final String PROXY = "https://gh-proxy.com/";
+
     /** 读 EOCD 用的尾巴长度。zip 注释最长 64KB，从尾部这个范围里一定能找到。 */
     private static final long TAIL = 64 * 1024;
-    /** 单次 Range 请求的数据量。8MB 一块 —— 再大就要担心堆，再小请求次数太多。 */
-    private static final int CHUNK = 8 << 20;
+    /**
+     * 单次 Range 请求的数据量。原来 8MB，为了让进度条不是每 8MB 才跳一格改成 4MB ——
+     * GMS 那 99.6MB 压缩数据切 25 块，慢网下也能一两秒动一次。
+     */
+    private static final int CHUNK = 4 << 20;
     /** 一次 Range 最多接多少字节，防着服务器忽略 Range 直接把 500MB 灌过来。 */
     private static final int MOST = 32 << 20;
 
@@ -148,8 +162,17 @@ final class Trio {
      * 任何一步失败返回 null —— 宁可报错也不能把「只取了一半」的清单交给装包流程。
      *
      * 日志按包一行：GSF 4.2 MB / GMS 187.1 MB / Play 84.6 MB，几百行进度对用户没意义。
+     * 下载过程中的百分比 / 速度走 {@link Reporter#tick}，同一个包始终占同一行。
      */
     static List<Part> ensure(Context ctx, Reporter r) {
+        return ensure(ctx, r, false);
+    }
+
+    /**
+     * @param proxy 经 {@link #PROXY} 中转取字节。反代只负责把字节送到，
+     *              落地前仍逐字比对 sha256，所以它决定的是「能不能下下来」。
+     */
+    static List<Part> ensure(Context ctx, Reporter r, boolean proxy) {
         Spec s = spec(ctx);
         if (!s.ok()) {
             r.line("下载清单缺失 · assets/" + SPEC, Reporter.BAD);
@@ -183,14 +206,24 @@ final class Trio {
             return null;
         }
 
-        r.line("从 MindTheGapps 取三件套 · 下 " + Installer.mb(s.download), Reporter.INFO);
+        String url = proxy ? PROXY + s.url : s.url;
+        // 行尾只留「直连 / 加速」两个词：活动区按 37 字截行，写成「经 gh-proxy」
+        // 会正好被截成「经…」—— 两种通道反而一个看得清、一个看不清。
+        r.line("从 MindTheGapps 取三件套 · " + Installer.mb(s.download)
+                + (proxy ? " · 加速" : " · 直连"), Reporter.INFO);
+        // 完整出处只进诊断：活动区那行要短，但排查「下不动」时得知道走没走反代
+        if (proxy) r.line("  经 " + PROXY + " 中转", Reporter.INFO);
 
         List<Entry> cd;
+        // 读目录要两趟 Range，经反代时首次回源能等上几十秒 —— 没有这行就像卡死
+        r.tick("dl:zip", "读包目录 · 等服务器响应", Reporter.INFO);
         try {
-            cd = centralDir(s);
+            cd = centralDir(s, url);
         } catch (Throwable t) {
             r.line("读不到 zip 目录 · " + t, Reporter.BAD);
             return null;
+        } finally {
+            r.tick("dl:zip", null, Reporter.INFO);
         }
 
         for (Part p : s.parts) {
@@ -203,7 +236,7 @@ final class Trio {
                 r.line(p.label + " 在 zip 里找不到 · " + p.path, Reporter.BAD);
                 return null;
             }
-            if (fetch(s, e, p, new File(dir, p.fileName()), r)) continue;
+            if (fetch(url, e, p, new File(dir, p.fileName()), r)) continue;
             return null;
         }
         return s.parts;
@@ -231,15 +264,15 @@ final class Trio {
      *
      * 不做 zip64：这个包 499MB，远在 4GB 以内，多了反而是没测过的分支。
      */
-    private static List<Entry> centralDir(Spec s) throws Exception {
-        byte[] tail = range(s.url, s.total - TAIL, s.total - 1);
+    private static List<Entry> centralDir(Spec s, String url) throws Exception {
+        byte[] tail = range(url, s.total - TAIL, s.total - 1);
         int i = lastEocd(tail);
         if (i < 0) throw new IOException("找不到 EOCD");
         long cdSize = u32(tail, i + 12);
         long cdOff = u32(tail, i + 16);
         if (cdSize <= 0 || cdOff <= 0 || cdOff + cdSize > s.total) throw new IOException("目录越界");
 
-        byte[] d = range(s.url, cdOff, cdOff + cdSize - 1);
+        byte[] d = range(url, cdOff, cdOff + cdSize - 1);
         List<Entry> out = new ArrayList<>();
         int p = 0;
         while (p + 46 <= d.length && u32(d, p) == 0x02014b50L) {
@@ -263,15 +296,29 @@ final class Trio {
         return null;
     }
 
-    /** 下载一个文件：写 .part → 边解压边算 sha256 → 校验 → 改名 → 盖章。 */
-    private static boolean fetch(Spec s, Entry e, Part p, File dst, Reporter r) {
+    /**
+     * 下载一个文件：写 .part → 边解压边算 sha256 → 校验 → 改名 → 盖章。
+     *
+     * 进度行走 {@link Reporter#tick} 原地刷新，收尾（成功或失败）都撤掉 ——
+     * 活动区该留的是每个包一行结果，不该留一个停在 87% 的残影。
+     */
+    private static boolean fetch(String url, Entry e, Part p, File dst, Reporter r) {
+        String key = "dl:" + p.label;
+        try {
+            return fetchBody(url, e, p, dst, r, key);
+        } finally {
+            r.tick(key, null, Reporter.INFO);
+        }
+    }
+
+    private static boolean fetchBody(String url, Entry e, Part p, File dst, Reporter r, String key) {
         File tmp = new File(dst.getPath() + ".part");
         MessageDigest md;
         long dataStart;
         try {
             md = MessageDigest.getInstance("SHA-256");
             // local header 的 extra 段长度只有 header 自己知道，所以得先读一遍它。
-            byte[] lh = range(s.url, e.off, e.off + 29);
+            byte[] lh = range(url, e.off, e.off + 29);
             if (lh.length < 30) throw new IOException("本地头读不到");
             dataStart = e.off + 30 + u16(lh, 26) + u16(lh, 28);
         } catch (Throwable t) {
@@ -283,8 +330,8 @@ final class Trio {
         long written = 0;
         try (OutputStream os = new FileOutputStream(tmp)) {
             written = e.method == 8
-                    ? inflate(s, e, dataStart, os, md, p, r)
-                    : store(s, e, dataStart, os, md, p, r);
+                    ? inflate(url, e, dataStart, os, md, p, t0, key, r)
+                    : store(url, e, dataStart, os, md, p, t0, key, r);
         } catch (Throwable t) {
             tmp.delete();
             r.line("  " + p.label + " 下载失败 · " + t, Reporter.BAD);
@@ -311,15 +358,16 @@ final class Trio {
     }
 
     /** deflate 流：逐块 Range 取压缩数据，喂给一个 Inflater，边解边写边算哈希。 */
-    private static long inflate(Spec s, Entry e, long dataStart, OutputStream os,
-                                MessageDigest md, Part p, Reporter r) throws Exception {
+    private static long inflate(String url, Entry e, long dataStart, OutputStream os,
+                                MessageDigest md, Part p, long t0, String key, Reporter r)
+            throws Exception {
         Inflater inf = new Inflater(true);
         byte[] out = new byte[256 * 1024];
         long pos = dataStart, left = e.csz, written = 0;
         int mark = -1;
         try {
             while (left > 0) {
-                byte[] chunk = range(s.url, pos, pos + Math.min(CHUNK, left) - 1);
+                byte[] chunk = range(url, pos, pos + Math.min(CHUNK, left) - 1);
                 if (chunk.length == 0) throw new IOException("连接断了");
                 left -= chunk.length;
                 pos += chunk.length;
@@ -331,7 +379,7 @@ final class Trio {
                     md.update(out, 0, n);
                     written += n;
                 }
-                mark = progress(e, pos - dataStart, p, mark, r);
+                mark = progress(e, pos - dataStart, p, t0, mark, key, r);
             }
             if (written != e.usz) throw new IOException("解压长度不符 " + written + "/" + e.usz);
         } finally {
@@ -341,29 +389,40 @@ final class Trio {
     }
 
     /** 没压缩的条目：直接把 Range 分块抄下来。 */
-    private static long store(Spec s, Entry e, long dataStart, OutputStream os,
-                              MessageDigest md, Part p, Reporter r) throws Exception {
+    private static long store(String url, Entry e, long dataStart, OutputStream os,
+                              MessageDigest md, Part p, long t0, String key, Reporter r)
+            throws Exception {
         long pos = dataStart, left = e.csz, written = 0;
         int mark = -1;
         while (left > 0) {
-            byte[] chunk = range(s.url, pos, pos + Math.min(CHUNK, left) - 1);
+            byte[] chunk = range(url, pos, pos + Math.min(CHUNK, left) - 1);
             if (chunk.length == 0) throw new IOException("连接断了");
             left -= chunk.length;
             pos += chunk.length;
             os.write(chunk);
             md.update(chunk);
             written += chunk.length;
-            mark = progress(e, pos - dataStart, p, mark, r);
+            mark = progress(e, pos - dataStart, p, t0, mark, key, r);
         }
         return written;
     }
 
-    /** 每过 25% 报一行到诊断，活动区只留每个包的一行结果。 */
-    private static int progress(Entry e, long got, Part p, int mark, Reporter r) {
+    /**
+     * 同一个包始终改同一行：`GMS 62% · 4.8 MB/s`。
+     *
+     * 只在百分比变了才刷 —— 4MB 一块时同一块内可能回调多次，重复改写同一行没意义。
+     * 百分比按「已收到的压缩字节」算，也就是用户感知的那条网速曲线。
+     *
+     * @return 上一次写过的百分比，调用方原样带回来
+     */
+    private static int progress(Entry e, long got, Part p, long t0, int mark,
+                                String key, Reporter r) {
         int pct = (int) (got * 100 / Math.max(1, e.csz));
-        int at = pct / 25;
-        if (at != mark && at > 0 && at < 4) r.line("  " + p.label + " " + (at * 25) + "%", Reporter.INFO);
-        return at;
+        if (pct == mark) return mark;
+        long ms = Math.max(1, System.currentTimeMillis() - t0);
+        r.tick(key, p.label + " " + pct + "% · " + Installer.mb(got * 1000 / ms) + "/s",
+                Reporter.INFO);
+        return pct;
     }
 
     /**

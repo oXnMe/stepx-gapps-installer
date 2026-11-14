@@ -108,11 +108,18 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         final String text;
         final int level;
         final String hm;
+        /** 进度行的身份：同一个 key 在活动区里只占一行，后写覆盖前写。里程碑为 null。 */
+        final String key;
 
         Line(String text, int level, String hm) {
+            this(text, level, hm, null);
+        }
+
+        Line(String text, int level, String hm, String key) {
             this.text = text;
             this.level = level;
             this.hm = hm;
+            this.key = key;
         }
     }
 
@@ -152,6 +159,16 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
     /** 活动区（里程碑）与全量日志走两个队列，活动区的内容是全量的严格子集。 */
     private final List<Line> hist = new ArrayList<>();
     private final StringBuilder full = new StringBuilder();
+    /** 进度行上次写全量日志的时刻，用来节流 —— 逐块记会几秒刷几百行。 */
+    private final Map<String, Long> tickAt = new java.util.HashMap<>();
+
+    /**
+     * 上次选的下载通道：true = 走 gh-proxy 中转。
+     *
+     * 只在内存里记，不落盘 —— 这是个「这次网络不行」的临时选择，不该变成
+     * 下次进来的默认值（第三方反代，用户每次都该是有意识地选它）。
+     */
+    private boolean dlProxy;
 
     /** 子系统的逐条输出往这儿写：只落全量日志，不占活动区。 */
     private final Reporter quiet = (s, level) -> detail(s, level);
@@ -159,10 +176,20 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
     /**
      * 介于两者之间的出口：带两格缩进的是进度明细（只进诊断，否则一次下载刷十几行），
      * 其余进活动区 —— 下 133MB 的时候不能让界面看起来像卡住。
+     *
+     * 进度行走 {@link #tick} 而不是 line：同一个包反复刷新同一行。
      */
-    private final Reporter loud = (s, level) -> {
-        if (s.startsWith("  ")) detail(s, level);
-        else line(s, level);
+    private final Reporter loud = new Reporter() {
+        @Override
+        public void line(String s, int level) {
+            if (s.startsWith("  ")) detail(s, level);
+            else MainActivity.this.line(s, level);
+        }
+
+        @Override
+        public void tick(String key, String s, int level) {
+            MainActivity.this.tick(key, s, level);
+        }
     };
 
     /** 最近一条警告/错误的原文，给里程碑补一句「为什么失败」。阶段开始时清空。 */
@@ -987,10 +1014,7 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
     /** 只在 UI 线程调用。全量日志每行带时间戳和级别字母，导出的文件自带时序。 */
     private void log(String s, int level, boolean milestone) {
         long now = System.currentTimeMillis();
-        String ts = fmt("HH:mm:ss.SSS", now);
-        full.append('[').append(ts).append("] ").append(LEVEL_TAG[level]).append(' ')
-                .append(s).append('\n');
-        if (full.length() > 600_000) full.delete(0, full.length() - 200_000);
+        appendFull(s, level, now);
         Log.i(TAG, s);
         // STEP 是阶段标题，不是错误 —— 只有 WARN / BAD 才算「最近错误」
         if ((level == WARN || level == BAD) && !s.trim().isEmpty()) lastBad = s;
@@ -999,6 +1023,53 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
             if (hist.size() > 600) hist.remove(0);
             renderActivity();
         }
+    }
+
+    private void appendFull(String s, int level, long now) {
+        full.append('[').append(fmt("HH:mm:ss.SSS", now)).append("] ")
+                .append(LEVEL_TAG[level]).append(' ').append(s).append('\n');
+        if (full.length() > 600_000) full.delete(0, full.length() - 200_000);
+    }
+
+    /**
+     * 同一行原地刷新（下载进度）。同一个 key 在活动区里始终只占一行，
+     * 传 null 把这一行撤掉 —— 下载结束用，别让活动区停在一个 87% 的残影上。
+     *
+     * 全量日志按秒节流：133MB 逐块记下来是几百行噪音，一秒一条照样能回溯卡在哪段。
+     */
+    @Override
+    public void tick(String key, String s, int level) {
+        runOnUiThread(() -> {
+            long now = System.currentTimeMillis();
+            int at = -1;
+            for (int i = hist.size() - 1; i >= 0; i--) {
+                if (key.equals(hist.get(i).key)) {
+                    at = i;
+                    break;
+                }
+            }
+            if (s == null) {
+                tickAt.remove(key);
+                if (at >= 0) {
+                    hist.remove(at);
+                    renderActivity();
+                }
+                return;
+            }
+            Line l = new Line(s, level, fmt("HH:mm", now), key);
+            if (at >= 0) {
+                hist.set(at, l);
+            } else {
+                hist.add(l);
+                if (hist.size() > 600) hist.remove(0);
+            }
+            Long was = tickAt.get(key);
+            if (was == null || now - was >= 1000) {
+                tickAt.put(key, now);
+                appendFull(s, level, now);
+            }
+            renderActivity();
+        });
     }
 
     private void renderActivity() {
@@ -1629,10 +1700,11 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
             if (items.isEmpty() && !Installer.allInstalled(sh)) {
                 // 在线包是默认来源，一键全流程不该停下来问「要不要下载」——
                 // 只有下不动（没网、存储不够、哈希不符）才退回选包。
-                boolean got = onlineItems() != null;
+                // 通道沿用上次在「在线获取」里选的，没选过就是直连。
+                boolean got = onlineItems(dlProxy) != null;
                 if (!got) {
                     flowArmed = true;
-                    line("三件套不全 · 先选包", WARN);
+                    line("三件套不全 · 先选包或换个源再取", WARN);
                     // 选择器前先讲清楚要三个，别让用户选了一个回来才发现不对
                     runOnUiThread(() -> showPickTip(this::launchPicker, () -> {
                         flowArmed = false;
@@ -1775,13 +1847,14 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
      * 在线取三件套：从 MindTheGapps 的 release zip 里只下三段，落成实体文件，再走同一套验签。
      *
      * 一次要下 133MB、落 276MB，所以放在后台线程。
-     * 日志按包一行 —— 逐块进度会把活动区刷成几十行。
+     * 日志按包一行 —— 逐块进度走 {@link #tick}，同一个包在同一行里刷新百分比和速度。
      *
+     * @param proxy true = 经 gh-proxy 中转
      * @return 验过签的三个文件；下不下来返回 null（原因已经进了日志）
      */
-    private List<Installer.Item> onlineItems() {
+    private List<Installer.Item> onlineItems(boolean proxy) {
         long t = System.currentTimeMillis();
-        List<Trio.Part> parts = Trio.ensure(this, loud);
+        List<Trio.Part> parts = Trio.ensure(this, loud, proxy);
         if (parts == null || parts.isEmpty()) return null;
         List<Installer.Item> found = new ArrayList<>();
         for (Trio.Part p : parts) found.add(Installer.inspect(p.file, p.label));
@@ -1789,12 +1862,58 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         return found;
     }
 
-    private void useOnline() {
+    private void useOnline(boolean proxy) {
+        dlProxy = proxy;
         runTask("在线取包", () -> {
-            if (onlineItems() == null) {
-                line("没取到包 · 也可以点「选包」用自己下的", WARN);
+            if (onlineItems(proxy) == null) {
+                line("没取到包 · 换加速再试，或点「选包」", WARN);
             }
         });
+    }
+
+    /**
+     * 下之前先问走哪条路：GitHub 直连，还是经 gh-proxy 中转。
+     *
+     * 不自动切换是有意的 —— gh-proxy 是第三方反代，流量经过谁该由用户自己点头。
+     * 直连失败时日志里会提示换源，选择权留给人。
+     */
+    private void askSource() {
+        Sheet s = new Sheet();
+        Trio.Spec sp = Trio.spec(this);
+
+        s.card.addView(Ui.text(this, "三件套从哪下", 17, th.text, true));
+        TextView lead = Ui.text(this,
+                (sp.ok() ? "要下 " + Installer.mb(sp.download) + "。" : "")
+                        + "GitHub 直连下不动就换加速通道。",
+                12, th.sub, false);
+        lead.setLineSpacing(dp(3), 1f);
+        lead.setPadding(0, dp(6), 0, dp(14));
+        s.card.addView(lead);
+
+        View direct = Ui.button(this, "直连 GitHub", Ui.PRIMARY);
+        View proxy = Ui.button(this, "gh-proxy 加速", Ui.GHOST);
+        direct.setOnClickListener(v -> {
+            s.dlg.dismiss();
+            useOnline(false);
+        });
+        proxy.setOnClickListener(v -> {
+            s.dlg.dismiss();
+            useOnline(true);
+        });
+        s.card.addView(direct, Ui.lp(dp(46), 0));
+        s.card.addView(proxy, Ui.lp(dp(46), dp(8)));
+
+        // 说清「第三方」这件事：内容仍按清单里的 sha256 校验，换的只是能通不能通
+        TextView note = Ui.text(this, "加速经 gh-proxy.com 中转，包内容仍按清单校验 sha256。",
+                11, th.sub, false);
+        note.setLineSpacing(dp(3), 1f);
+        note.setPadding(0, dp(12), 0, 0);
+        s.card.addView(note);
+
+        View cancel = Ui.button(this, "取消", Ui.GHOST);
+        cancel.setOnClickListener(v -> s.dlg.dismiss());
+        s.card.addView(Ui.row(this, dp(8), cancel), Ui.lp(dp(46), dp(14)));
+        s.show();
     }
 
     /**
@@ -2032,7 +2151,8 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         use.setOnClickListener(v -> {
             went[0] = true;
             s.dlg.dismiss();
-            useOnline();
+            // 先问走哪条路，再开始下 133MB
+            askSource();
         });
         s.card.addView(Ui.row(this, dp(8), cancelBtn, ok, use), Ui.lp(dp(46), dp(16)));
 
