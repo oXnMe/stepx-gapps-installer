@@ -68,15 +68,33 @@ jobs:
           path: out/stepx-gapps-installer.apk
           if-no-files-found: error
 
+      # Release 正文取 CHANGELOG 里 `## <tag>` 那一节；没有这一节就用通用说明，
+      # 免得漏写 changelog 时发出去的 Release 是空白。
+      - name: Collect release notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -e
+          : > release-notes.md
+          if [ -f CHANGELOG.md ]; then
+            awk -v t="## $GITHUB_REF_NAME" '
+              $0 == t { f = 1; next }
+              f && /^## / { exit }
+              f { print }
+            ' CHANGELOG.md | sed -e '/./,$!d' > release-notes.md
+          fi
+          if [ ! -s release-notes.md ]; then
+            printf '%s\n\n%s\n\n%s\n' \
+              'StepX Neo（PZ261A / Android 16 / StepOS）用的 GApps 三件套安装器。' \
+              '装 GSF / GMS / Play，并把特权权限注入 system_server，让 Play 能登录、下载、更新。' \
+              '需要 Shizuku，全程在手机上完成。用法与限制见 README。' > release-notes.md
+          fi
+          cat release-notes.md
+
       # 打 v* tag 时才发 Release，平时只留 artifact
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
         with:
           name: ${{ github.ref_name }}
-          body: |
-            StepX Neo（PZ261A / Android 16 / StepOS）用的 GApps 三件套安装器。
-
-            装 GSF / GMS / Play，并把特权权限注入 system_server，让 Play 能登录、下载、更新。
-            需要 Shizuku，全程在手机上完成。用法与限制见 README。
+          body_path: release-notes.md
           files: out/stepx-gapps-installer.apk
