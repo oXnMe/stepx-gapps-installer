@@ -31,8 +31,6 @@ final class About {
 
     static final String REPO = "https://github.com/xydzf520/stepx";
     static final String SELF_REPO = "https://github.com/oXnMe/stepx-gapps-installer";
-    static final String HANDOFF =
-            "https://github.com/xydzf520/stepx/tree/main/handoff/google-play-stepx";
 
     private About() {}
 
@@ -86,21 +84,22 @@ final class About {
         body.setPadding(Ui.dp(a, 16), Ui.dp(a, 12), Ui.dp(a, 16), Ui.dp(a, 4));
 
         body.addView(Ui.mono(a, "StepX GApps 安装器  v" + verName(a), 12, th.text, true));
-        body.addView(para(a, "在手机上装好 GSF / GMS / Play，再把特权权限注入 system_server。"
-                + "重启后权限会掉，用「修复」补回。", th.sub, 6, 6));
+        body.addView(para(a, "在 StepX Neo（PZ261A / Android 16 / StepOS）上装 GSF、GMS 和 Play 商店，"
+                + "并把特权权限注入 system_server，让 Play 能登录、下载、更新。"
+                + "全程在手机上完成，不需要电脑。", th.sub, 6, 12));
 
         body.addView(para(a, "注入链路源自社区项目 github.com/xydzf520/stepx（AGPL-3.0-only）。"
                 + "下面按来源分三类。", th.sub, 0, 4));
 
         // ---------- 一、文件级取自上游 ----------
         body.addView(section(a, "01  文件级取自上游"));
-        body.addView(para(a, "一个原样搬入，两个在它上面改。", th.sub, 0, 8));
+        body.addView(para(a, "一个原样搬入，三个在它上面改。", th.sub, 0, 8));
 
         TextView repo = link(a, REPO, th.brand);
         repo.setPadding(0, 0, 0, Ui.dp(a, 6));
         body.addView(repo);
 
-        TextView base = Ui.mono(a, "路径基准  上游仓库根目录", 9.5f, th.sub, false);
+        TextView base = Ui.mono(a, "路径基准  handoff/google-play-stepx/module", 9.5f, th.sub, false);
         base.setPadding(0, 0, 0, Ui.dp(a, 12));
         body.addView(base);
 
@@ -108,13 +107,21 @@ final class About {
                 "ptrace 进 system_server 跑 DEX，改 PackageManager 的内存态权限位。整份搬入。",
                 "module/inject.py · 30,229 B · sha256 27930528…", th));
         body.addView(item(a, "衍生", th.info, "开机启动适配",
-                "接管 ubuntu_zygote：父进程 execv 原厂原件，子进程 setsid 后跑 boot.py。"
-                        + "只改了三处：抽常量、补建状态目录、失败回原件。",
+                "上游的「父进程 execv 原厂 launcher，子进程 setsid 后跑 boot.py」保留。"
+                        + "改了三处：STOCK 换成不带日期的文件名（找不到退回旧名）、"
+                        + "抽出常量、写错误日志前补建状态目录。",
                 "module/launcher.py → boot-adapter.py", th));
         body.addView(item(a, "衍生", th.info, "注入时序",
-                "boot_id 去重 + flock + fork → chroot → 写 /proc/self/attr/current 到 "
-                        + "system_server 域。只加了只读探测槽位。",
+                "一条尝试的骨架照搬上游：flock 抢锁 → boot_id 去重 → 睡 12s → fork → "
+                        + "chroot → 换 uid 1000 → 写 attr/current → 定位 system_server → "
+                        + "mmap 回传 → 软硬双超时 → 校验输出契约。这里抽成 attempt()，"
+                        + "另加 probe 通道与注入收尾的解禁阶段。",
                 "module/boot.py → boot.py", th));
+        body.addView(item(a, "衍生", th.info, "开机解禁",
+                "StepOS 每次开机把三件套写成 enabled=2，shell 改不回来。这里用同一条 ptrace "
+                        + "通道多跑一份载荷，以 system_server 的身份把三个包写回默认启用态，"
+                        + "不重装、不丢 GSF 数据。",
+                "module/inject.py → inject-enable.py", th));
 
         // ---------- 二、思路同源、实现自有 ----------
         body.addView(section(a, "02  只借思路，代码自己写"));
@@ -122,11 +129,13 @@ final class About {
                 th.sub, 0, 8));
 
         body.addView(item(a, "思路", th.warn, "官方签名、不重签",
-                "上游按 target.json 下 MindTheGapps 的 zip 取原件。重签会断掉 GMS 与 Play "
-                        + "之间的签名互信。本项目的验签是自写的。",
+                "上游按 target.json 下 MindTheGapps 的 zip 取原件，装前用 apksigner 的输出"
+                        + "比对签名。这里同样钉死原厂签名，只是自己解析 APK 签名块，不依赖 apksigner。"
+                        + "重签会断掉 GMS 与 Play 之间的签名互信。",
                 "对照 target.json", th));
         body.addView(item(a, "思路", th.warn, "只补缺项",
-                "先读设备状态再出计划，已到位的不重装。逐包比 versionCode。",
+                "出计划前先读设备状态，已到位的不重装。本项目逐包比 versionCode，"
+                        + "上游比的是已装包的哈希与签名。",
                 "对照 tools/install_recovery.py", th));
         body.addView(item(a, "思路", th.warn, "分开核验、未确认不算成功",
                 "权限、进程、启动域、版本各算一项，未知状态不报成功。",
@@ -138,13 +147,17 @@ final class About {
         body.addView(item(a, "手法不同", th.warn, "借固件自带的 root 通道",
                 "上游走 RootBridge；本项目走网关 + openclaw sudo 拿 uid 0，再自己建目录。",
                 "对照 tools/root_worker.py", th));
+        body.addView(item(a, "手法相同", th.warn, "安装白名单",
+                "StepOS 逐包拦 adb 安装，放行靠同一个 Settings 键。上游在 manage.py 里改它；"
+                        + "本项目是从 stepos-services.jar 反解出逐包判定后自己写的。",
+                "对照 tools/manage.py", th));
 
         // ---------- 三、完全自有 ----------
         body.addView(section(a, "03  完全自有"));
-        body.addView(bullet(a, "手机侧独立 App + Shizuku 后端，不需要电脑。", th));
-        body.addView(bullet(a, "六步编排、一键全流程、SelfHeal 自愈。", th));
+        body.addView(bullet(a, "整套流程在手机上跑，靠 Shizuku 提权，不用连电脑。", th));
+        body.addView(bullet(a, "分步执行、一键全流程、SelfHeal 自愈。", th));
         body.addView(bullet(a, "Play 认证拦截页可以就地修补（走 Play 自己的身份改本地清单），也能一键回滚。", th));
-        body.addView(bullet(a, "APK 解析验签、split 分包安装、StepOS 白名单预写。", th));
+        body.addView(bullet(a, "split 分包安装，.apkm 与三个单包都能一次装齐。", th));
         // 体积念的是下载量，构建时写进 assets/google.json，换了 release 就跟着变。
         Trio.Spec sp = Trio.spec(a);
         body.addView(bullet(a, "在线取三件套 · 只下 MindTheGapps 里用得上的三段"
@@ -156,14 +169,15 @@ final class About {
         // ============ 许可 ============
         body.addView(section(a, "04  许可与边界"));
         body.addView(para(a, "上游以 AGPL-3.0-only 发布。本应用内嵌其 inject.py、带有 boot.py / "
-                + "launcher.py 的衍生文件，同样按 AGPL-3.0-only 对待；只自用、不对外分发时不涉及分发义务。",
+                + "launcher.py / inject-enable.py 的衍生文件，同样按 AGPL-3.0-only 对待；"
+                + "只自用、不对外分发时不涉及分发义务。",
                 th.sub, 0, 8));
         body.addView(para(a, "与 STEPX、Amoo、Google 均无隶属关系。装好三件套不等于通过 "
                 + "Google 设备认证。", th.sub, 0, 8));
         body.addView(para(a, "三件套版权归 Google。本应用只按原厂签名取用，不改包、不重签。",
                 th.sub, 0, 8));
-        body.addView(para(a, "注入改的是内存态，重启即失效；固件 OTA 后哈希与偏移会不匹配，自检会拦住。",
-                th.sub, 0, 4));
+        body.addView(para(a, "注入改的是内存态，重启后由开机脚本重新注入；固件 OTA 后哈希与偏移"
+                + "会不匹配，自检会拦住。", th.sub, 0, 4));
 
         ScrollView sc = new ScrollView(a);
         sc.setVerticalScrollBarEnabled(false);

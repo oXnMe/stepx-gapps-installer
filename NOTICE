@@ -8,9 +8,10 @@ Licensed under the GNU Affero General Public License v3.0 only (see LICENSE).
 
 本项目的「注入」能力来自社区项目：
 
-    stepx-companion  ——  https://github.com/xydzf520/stepx
+    stepx-companion   https://github.com/xydzf520/stepx
     许可：AGPL-3.0-only
-    路径基准：该仓库根目录下的 module/
+    路径基准：该仓库 handoff/google-play-stepx/ 下的 module/ 与 tools/
+              （早先版本把 module/ 放在仓库根目录，两个位置都出现过）
 
 按来源分三类，均在 app/assets/payload/ 下：
 
@@ -20,15 +21,22 @@ Licensed under the GNU Affero General Public License v3.0 only (see LICENSE).
                               与应用内「关于」页显示的一致。
 
   在上游基础上修改（衍生作品，仍按 AGPL-3.0-only）
-    boot.py                   上游 module/boot.py。改动：boot_id 去重、flock、
-                              fork → chroot → 写 /proc/self/attr/current，
-                              以及只读探测槽位。
-    boot-adapter.py           上游 module/launcher.py。改动：父进程 execv 原厂
-                              launcher，子进程 setsid 后拉起 boot.py；抽出常量、
-                              补建状态目录、失败回落原厂实现。
+    boot.py                   上游 module/boot.py。一条尝试的骨架照搬上游：flock 抢锁
+                              → boot_id 去重（含 last.json 语义）→ 睡 12s → fork →
+                              chroot → 换 uid 1000 → 写 /proc/self/attr/current →
+                              定位唯一的 system_server → mmap 回传结果 →
+                              25s 软超时 / 32s 硬超时 → 校验输出契约。
+                              本项目把它抽成 attempt()，另加两处：probe 通道
+                              （指定载荷、切换身份、只读槽位）与注入收尾的解禁阶段
+                              （inject-enable.py）。
+    boot-adapter.py           上游 module/launcher.py。上游的「父进程 execv 原厂
+                              launcher，子进程 setsid 后跑 boot.py」原样保留；本项目
+                              改了三处：STOCK 换成不带日期的文件名（找不到退回旧名）、
+                              抽出 BASE / STATE 常量、写错误日志前补建状态目录。
 
   本项目自有
-    deploy.py  deploy-run.py  repair.py  recover.py  read-last.py  stepx-fix.sh
+    deploy.py  deploy-run.py  repair.py  recover.py  read-last.py
+    read-compat.py  arm-play-compat.py  play-compat.py
     inject-enable.py       inject.py 的副本，只换掉内嵌 dex 与要加载的类名，
                            注入骨架逐字节沿用上游；换进去的 stepx.EnableProbe
                            是本项目自有代码（源码见 payload-src/）
@@ -39,7 +47,7 @@ Licensed under the GNU Affero General Public License v3.0 only (see LICENSE).
 二、随附的应用
 ===============================================================================
 
-本应用**不再**内置、也不再分发 Google 的任何二进制：
+本应用不内置、也不分发 Google 的任何二进制：
 
   - GSF（com.google.android.gsf）、GMS（com.google.android.gms）、
     Play 商店（com.android.vending）的版权归 Google LLC。
