@@ -13,7 +13,11 @@ Contract:
 """
 import os
 
-STOCK = '/usr/local/bin/ubuntu_zygote.stepx-stock-20261021'
+STOCK = '/usr/local/bin/ubuntu_zygote.stepx-stock'
+# 上一版把固件日期写进了文件名。两个名字都认，**但不改名** —— 改名会让此刻
+# 正在跑的旧适配器 execv 一个已经不存在的路径，容器直接起不来（真机踩过）。
+if not os.path.exists(STOCK):
+    STOCK = '/usr/local/bin/ubuntu_zygote.stepx-stock-20261021'
 BASE = '/usr/local/lib/stepx-gms'
 STATE = '/var/lib/stepx-gms'
 

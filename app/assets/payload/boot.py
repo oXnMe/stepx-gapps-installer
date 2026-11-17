@@ -1,5 +1,5 @@
 """No daemon or socket. One attempt per system_server lifetime, with a deadline."""
-import json, ctypes, time, signal, hashlib, base64, struct, mmap, fcntl
+import json, ctypes, time, signal, hashlib, base64, struct, mmap, fcntl, sqlite3, zlib
 
 STATE = '/var/lib/stepx-gms'
 lockfd = os.open(STATE + '/lock', os.O_RDWR | os.O_CREAT, 0o600)
@@ -50,6 +50,14 @@ try:
     probe_payload = open(STATE + '/probe-payload').read().strip() or 'inject-account.py'
 except OSError:
     probe_payload = 'inject-account.py'
+# Which identity the probe runs under. Empty (the default) keeps the factory
+# path: system_server. 'play' switches to Play's own uid + SELinux domain, which
+# is the only way to touch its private files; that decision has to be read
+# before the chroot, because /var/lib does not exist inside it.
+try:
+    scope = open(STATE + '/probe-scope').read().strip() if probe else ''
+except OSError:
+    scope = ''
 payload = open('/usr/local/lib/stepx-gms/' + (probe_payload if probe else 'inject.py')).read()
 shared = mmap.mmap(-1, 256 * 1024, flags=mmap.MAP_SHARED | mmap.MAP_ANONYMOUS)
 lib = ctypes.CDLL(None, use_errno=True)
@@ -60,30 +68,43 @@ if child == 0:
     def expired(signum, frame):
         raise TimeoutError('GMS repair deadline')
     signal.signal(signal.SIGALRM, expired)
-    signal.alarm(25)
+    signal.alarm(60 if scope == 'play' else 25)
     try:
         os.fchdir(rootfd); os.chroot('.'); os.chdir('/')
-        os.setresgid(1000, 0, 0); os.setresuid(1000, 0, 0)
-        lib.setfsgid(1000); lib.setfsuid(1000)
-        for context in ('u:r:system_server_startup:s0', 'u:r:system_server:s0'):
+        if scope == 'play':
+            # Play 的私有目录只在它自己的域里可读写。uid 取目录属主（不用 dumpsys，
+            # Play 此刻已经被停掉了），MLS 类别由 uid 推出，与 u0_aNNN 的标签一致；
+            # euid 留 0 是为了 DAC —— SELinux 域才是真正的闸门。
+            owner = os.stat('/data/user/0/com.android.vending').st_uid
+            span = owner - 10000
+            os.setresgid(owner, 0, 0); os.setresuid(owner, 0, 0)
+            lib.setfsgid(owner); lib.setfsuid(owner)
             with open('/proc/self/attr/current', 'w') as stream:
-                stream.write(context)
-        lib.setfsuid(0)
-        candidates = []
-        for item in os.listdir('/proc'):
-            if item.isdigit():
-                try:
-                    if open('/proc/' + item + '/comm').read().strip() == 'system_server':
-                        candidates.append(int(item))
-                except OSError:
-                    pass
-        assert len(candidates) == 1, 'No unique system_server'
-        os.environ['STEPX_SYSTEM_SERVER_PID'] = str(candidates[0])
+                stream.write('u:r:untrusted_app:s0:c%d,c%d,c512,c768'
+                             % (span & 0xff, 256 + (span >> 8)))
+            out.update(uid=os.getuid(), euid=os.geteuid(), phase='payload')
+        else:
+            os.setresgid(1000, 0, 0); os.setresuid(1000, 0, 0)
+            lib.setfsgid(1000); lib.setfsuid(1000)
+            for context in ('u:r:system_server_startup:s0', 'u:r:system_server:s0'):
+                with open('/proc/self/attr/current', 'w') as stream:
+                    stream.write(context)
+            lib.setfsuid(0)
+            candidates = []
+            for item in os.listdir('/proc'):
+                if item.isdigit():
+                    try:
+                        if open('/proc/' + item + '/comm').read().strip() == 'system_server':
+                            candidates.append(int(item))
+                    except OSError:
+                        pass
+            assert len(candidates) == 1, 'No unique system_server'
+            os.environ['STEPX_SYSTEM_SERVER_PID'] = str(candidates[0])
         exec(compile(payload, 'inject.py', 'exec'), globals())
         answer = out.get('java_result', '')
         if probe:
             out['probe_result'] = answer
-            out['status'] = 'probe'
+            out['status'] = 'compat' if scope == 'play' else 'probe'
         else:
             checks = [line for line in answer.splitlines() if line.startswith('check ')]
             if not answer.startswith('GRANT_RESULT\nSYSTEM_GMS=true\n') or len(checks) < 120 or not all(line.endswith('=0') for line in checks):
@@ -97,7 +118,7 @@ if child == 0:
         shared[:4] = len(data).to_bytes(4, 'little')
         shared[4:4 + len(data)] = data
         os._exit(0)
-deadline = time.monotonic() + 32
+deadline = time.monotonic() + (70 if scope == 'play' else 32)
 while True:
     waited, status = os.waitpid(child, os.WNOHANG)
     if waited:

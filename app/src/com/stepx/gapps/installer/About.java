@@ -142,8 +142,8 @@ final class About {
         // ---------- 三、完全自有 ----------
         body.addView(section(a, "03  完全自有"));
         body.addView(bullet(a, "手机侧独立 App + Shizuku 后端，不需要电脑。", th));
-        body.addView(bullet(a, "七阶段编排、一键全流程、SelfHeal 自愈。", th));
-        body.addView(bullet(a, "/sdcard/stepx-fix.sh 兜底脚本 · 走 shell（uid 2000），网关挂了也能跑。", th));
+        body.addView(bullet(a, "六步编排、一键全流程、SelfHeal 自愈。", th));
+        body.addView(bullet(a, "Play 认证拦截页可以就地修补（走 Play 自己的身份改本地清单），也能一键回滚。", th));
         body.addView(bullet(a, "APK 解析验签、split 分包安装、StepOS 白名单预写。", th));
         // 体积念的是下载量，构建时写进 assets/google.json，换了 release 就跟着变。
         Trio.Spec sp = Trio.spec(a);

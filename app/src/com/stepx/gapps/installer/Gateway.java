@@ -47,6 +47,28 @@ final class Gateway {
         return new Gateway(aid, hmac(SALT, MSG_PREFIX + aid));
     }
 
+    /**
+     * 网关在不在监听。**不需要 token**：连不上就是不在，连上了状态码本身没意义
+     * （根路径永远返回 405/JSON 错误）。
+     *
+     * 端口写在 {@link #ROOT} 里，容器一起网关就没了 —— 这是「部署 / 注入 / 修补
+     * 全都做不了」的唯一根因，值得占一个状态格。
+     */
+    static boolean ping() {
+        HttpURLConnection c = null;
+        try {
+            c = (HttpURLConnection) new URL(ROOT).openConnection();
+            c.setConnectTimeout(1200);
+            c.setReadTimeout(1200);
+            c.setRequestMethod("GET");
+            return c.getResponseCode() > 0;
+        } catch (Throwable t) {
+            return false;
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
     /** 网关活着没有。用根路径探，比 POST 便宜。 */
     boolean reachable() {
         HttpURLConnection c = null;

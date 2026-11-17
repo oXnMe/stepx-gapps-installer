@@ -6,22 +6,23 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * stepx-fix.sh 的 Java 移植。
+ * 自愈：判据 + 修复动作。
  *
- * 为什么要移植而不是「把脚本 push 到 /sdcard 再 sh 它」：
+ * 这一份最早是 stepx-fix.sh 的 Java 移植。那份 shell 脚本 v0.32 之后删了 ——
+ * 它做不了认证修补（那需要 Play 自己的进程身份），剩下的检测能力 App 里都有，
+ * 留着两套实现只会让判据慢慢漂开。所以这里的注释仍然按「移植」记着当年的理由：
+ *
  *   - 脚本跑起来只有一行行文本，UI 拿不到结构化状态，八项体检没法逐项上色；
  *   - 脚本里那段 80 秒的盲等，移植后可以改成轮询权限，通常 40–60 秒就能进下一步；
  *   - 用户在 app 里读完日志就能看到结论，不用再去翻终端。
  *
- * 但**语义必须和脚本一致**，五条要点，改任何一条都要同步改脚本：
+ * 五条要点，改任何一条都要过一遍 eleven 项体检：
  *   1. G 段（appops）故意不置 NEED —— appops 不触发 PMS 权限重算，不该白等一次重注入
  *   2. 失败分支不推进版本记账 —— 版本变了但没救回来时，下次要再强制一次
  *   3. 顺序固定：禁用包 → FLAG_SINGLE_USER → 权限 → appops → 重注入 → GMS 重启
  *   4. 退出码 0–6 含义不变，见下方常量
  *   5. 权限判据只认 MANAGE_USERS（两个包都是）—— 别用 INTERACT_ACROSS_USERS，
  *      本 ROM 默认授予，判不出注入在不在。v0.25 改过这里却漏了脚本，隔了 13 天才发现
- *
- * 对应脚本：app/assets/payload/stepx-fix.sh（同一条判据的另一份实现）
  */
 final class SelfHeal {
 
@@ -29,7 +30,7 @@ final class SelfHeal {
     static final String GMS = "com.google.android.gms";
     static final String PLAY = "com.android.vending";
 
-    /** 和脚本共用同一个状态文件，两边谁先跑都认对方的记账。 */
+    /** 状态文件。名字沿用当年那份脚本的（/sdcard），换了名老机器的记账就丢了。 */
     static final String STATE = "/sdcard/stepx-fix.state";
     static final String APKS = "/data/local/tmp/stepx-apks";
 
@@ -356,7 +357,7 @@ final class SelfHeal {
 
         if (!f.cert.isEmpty()) {
             r.line("权限与进程都正常，但 Play 被认证拦截页挡住（" + f.cert + "）。", Reporter.BAD);
-            r.line("→ 本地 flag 被刷回了，重注入治不了它；重跑 Google 兼容补丁的 play scope（README §8.8.10）。",
+            r.line("→ 这是 Play 本地的拦截清单，重注入治不了；点面板上的 CERT 格 →「修补」。",
                     Reporter.WARN);
             return E_CERT;
         }

@@ -12,7 +12,7 @@ import java.util.Map;
  *
  * 落点（都在容器里，adb shell 看不见）：
  *   /usr/local/bin/ubuntu_zygote           ← boot-adapter.py 顶替原厂启动器
- *   /usr/local/bin/ubuntu_zygote.stepx-stock-20261021  ← 原厂备份
+ *   /usr/local/bin/ubuntu_zygote.stepx-stock  ← 原厂备份（旧名 …-20261021 仍被认）
  *   /usr/local/lib/stepx-gms/{boot,inject,recover,repair}.py
  *   /var/lib/stepx-gms/                    ← 注入状态（last.json / lock）
  *
@@ -35,7 +35,16 @@ final class Deploy {
     static final String VAR = "/var/lib/stepx-gms";
     static final String BIN = "/usr/local/bin";
     static final String ZYGOTE = BIN + "/ubuntu_zygote";
-    static final String STOCK = BIN + "/ubuntu_zygote.stepx-stock-20261021";
+    /**
+     * 原厂启动器的备份槽位。
+     *
+     * 以前叫 `ubuntu_zygote.stepx-stock-20261021` —— 名字里那个日期是当年手写进去的，
+     * 换一台固件不同的机器就变成了假信息（它本来只是个槽位名，跟备份的是哪天固件无关）。
+     * 现在固定成不带日期的槽位；旧名保留为兼容路径，deploy.py 首次部署时会把旧的
+     * rename 成新名，boot-adapter 两边都认。
+     */
+    static final String STOCK = BIN + "/ubuntu_zygote.stepx-stock";
+    static final String STOCK_LEGACY = BIN + "/ubuntu_zygote.stepx-stock-20261021";
     static final String MANIFEST = LIB + "/.deployed.json";
 
     private Deploy() { }
@@ -45,12 +54,19 @@ final class Deploy {
     static final class State {
         boolean adapter;       // ubuntu_zygote 就是我们的适配器
         boolean stock;         // 原厂备份在
+        /**
+         * 备份里躺的其实是我们的适配器 —— 老 bug 留下的现场：适配器一更新，
+         * sha 比较失配，deploy 就把旧适配器当成原厂件备份了。这种状态要判不健康，
+         * 才会再跑一次部署，让 deploy.py 从 archive 里把真原厂件找回来。
+         */
+        boolean stockOurs;
         boolean libRoot;       // 目录属主是 root
         int matched;           // 清单里哈希对得上的文件数
         String note = "";
 
         boolean ok() {
-            return adapter && stock && libRoot && matched == Payload.DEPLOY.length;
+            return adapter && stock && !stockOurs && libRoot
+                    && matched == Payload.DEPLOY.length;
         }
     }
 
@@ -70,7 +86,18 @@ final class Deploy {
             "    except OSError:",
             "        return '-'",
             "print('ZYGOTE=' + sha('" + ZYGOTE + "'))",
-            "print('STOCK=' + ('1' if os.path.exists('" + STOCK + "') else '0'))",
+            // 新槽位优先，旧槽位（带去日期的老名字）也认 —— 已经部署过的机器不用重跑
+            "STOCK='" + STOCK + "' if os.path.exists('" + STOCK + "') else '"
+                    + STOCK_LEGACY + "'",
+            "print('STOCK=' + ('1' if os.path.exists(STOCK) else '0'))",
+            "print('STOCK_PATH=' + STOCK)",
+            // STOCK 里躺着我们的适配器 = 备份被顶替过，得让它重新跑一次部署去修复
+            "def _ours(p):",
+            "    try:",
+            "        return b'/usr/local/lib/stepx-gms' in open(p, 'rb').read(4096)",
+            "    except OSError:",
+            "        return False",
+            "print('STOCK_OURS=' + ('1' if _ours(STOCK) else '0'))",
             "try:",
             "    print('LIB_UID=' + str(os.stat(LIB).st_uid))",
             "except OSError:",
@@ -104,6 +131,7 @@ final class Deploy {
         String adapter = Payload.sha256(Payload.read(ctx, "boot-adapter.py"));
         st.adapter = adapter.equals(kv.get("ZYGOTE"));
         st.stock = "1".equals(kv.get("STOCK"));
+        st.stockOurs = "1".equals(kv.get("STOCK_OURS"));
         st.libRoot = "0".equals(kv.get("LIB_UID"));
         if (!st.libRoot && !"-1".equals(kv.get("LIB_UID"))) {
             st.note = LIB + " 属主是 uid " + kv.get("LIB_UID") + "（应为 root）";
@@ -144,6 +172,10 @@ final class Deploy {
         }
         if (!st.adapter) r.line("  ubuntu_zygote 还不是本适配器", Reporter.INFO);
         if (!st.stock) r.line("  原厂备份不在（" + STOCK + "）", Reporter.INFO);
+        if (st.stockOurs) {
+            r.line("  原厂备份里躺的是我们的适配器（老版本留下的现场）—— 会从 archive 找回原厂件",
+                    Reporter.WARN);
+        }
         if (st.matched < Payload.DEPLOY.length) {
             r.line("  载荷一致 " + st.matched + "/" + Payload.DEPLOY.length, Reporter.INFO);
         }
@@ -235,69 +267,7 @@ final class Deploy {
         }
     }
 
-    // ------------------------------- 阶段 6 -------------------------------
-
-    /** 兜底脚本的落点：用户手上的任意终端都够得着。 */
-    static final String FALLBACK = "/sdcard/stepx-fix.sh";
-
-    /**
-     * 阶段 6：把 stepx-fix.sh 放到 /sdcard。
-     *
-     * 意义是「app 不在了也能救」—— 卸载本 app、Shizuku 崩了、手上只剩电脑，
-     * 都还能跑 `sh /sdcard/stepx-fix.sh`。所以它必须落在用户够得着的地方。
-     *
-     * 为什么这一阶段**不走 root 通道**：
-     *   /sdcard 是 FUSE，root 在 u:r:zygote:s0 下写它会撞 avc denied ——
-     *   跟 M3 里 pm install 读 /sdcard 失败是同一个原因（system_server 没有 fuse 读权限）。
-     *   而 shell(uid 2000) 有 sdcard_rw，写这里反而是唯一顺畅的身份。
-     *
-     * 顺带的好处：这一步不需要提权，网关挂了它照样能完成。
-     */
-    static boolean fallback(Context ctx, Shell sh, Reporter r) {
-        r.line("── 阶段 6：兜底脚本 ──", Reporter.STEP);
-
-        byte[] data;
-        try {
-            data = Payload.read(ctx, Payload.FALLBACK);
-        } catch (Throwable t) {
-            r.line("  APK 里没有 " + Payload.FALLBACK + "：" + t.getMessage(), Reporter.BAD);
-            return false;
-        }
-        String want = Payload.sha256(data);
-
-        String have = sh.exec("sha256sum " + FALLBACK + " 2>/dev/null | cut -d' ' -f1", 40)
-                .stdout().trim();
-        if (want.equals(have)) {
-            r.line("  " + FALLBACK + " 已是同一版本（" + short8(want) + "），跳过", Reporter.OK);
-            return true;
-        }
-        if (have.isEmpty()) {
-            r.line("  设备上还没有兜底脚本，写入中…", Reporter.INFO);
-        } else {
-            r.line("  覆盖设备上的旧版本（" + short8(have) + " → " + short8(want) + "）",
-                    Reporter.INFO);
-        }
-
-        Shell.Exec e = sh.put(new java.io.ByteArrayInputStream(data), FALLBACK, 60);
-        if (!e.ok()) {
-            r.line("  写入失败：" + e.describe(), Reporter.BAD);
-            return false;
-        }
-
-        // 写完必须读回来核一遍：/sdcard 是 FUSE，截断/续写都可能悄悄留下半份文件，
-        // 而一个半份的 .sh 看起来和完整的一样「存在」
-        String after = sh.exec("sha256sum " + FALLBACK + " 2>/dev/null | cut -d' ' -f1", 40)
-                .stdout().trim();
-        boolean ok = want.equals(after);
-        r.line(ok ? "  已落 " + FALLBACK + "（" + data.length + " 字节）"
-                        : "  写入后哈希对不上（读回 " + (after.isEmpty() ? "空" : short8(after)) + "）",
-                ok ? Reporter.OK : Reporter.BAD);
-        if (ok) {
-            r.line("  用法：任意终端 `sh " + FALLBACK + "`；"
-                    + "`force` 强制重注入，`cert` 只查认证拦截页", Reporter.INFO);
-        }
-        return ok;
-    }
+    // ------------------------------- 阶段 6 已删除 -------------------------------
 
     private static String short8(String s) {
         return s == null || s.length() < 8 ? String.valueOf(s) : s.substring(0, 8);
@@ -368,7 +338,7 @@ final class Deploy {
         return ok;
     }
 
-    private static boolean prepareStage(Gateway gw, Reporter r) {
+    static boolean prepareStage(Gateway gw, Reporter r) {
         String code = String.join("\n",
                 "import os",
                 "p='" + STAGE + "'",
@@ -384,7 +354,7 @@ final class Deploy {
         return true;
     }
 
-    private static boolean stage(Gateway gw, String name, byte[] data, Reporter r) {
+    static boolean stage(Gateway gw, String name, byte[] data, Reporter r) {
         String code = String.join("\n",
                 "import base64, os",
                 "p=" + py(STAGE + "/" + name),
@@ -404,7 +374,7 @@ final class Deploy {
         return true;
     }
 
-    private static void clearOut(Gateway gw) {
+    static void clearOut(Gateway gw) {
         gw.run(new String[]{"python3", "-c",
                 "import os\n"
                         + "try: os.unlink('" + STAGE + "/out.txt')\n"
@@ -413,7 +383,7 @@ final class Deploy {
     }
 
     /** out.txt 走 base64 回传：省掉在 Java 里解析网关 JSON 的转义。 */
-    private static String readOut(Gateway gw) {
+    static String readOut(Gateway gw) {
         Gateway.Resp resp = gw.run(new String[]{"python3", "-c",
                 "import base64\n"
                         + "try:\n"

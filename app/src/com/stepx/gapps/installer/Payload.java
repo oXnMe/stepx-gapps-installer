@@ -21,7 +21,7 @@ import java.security.MessageDigest;
  *   inject.py        逐字节取自 xydzf520/stepx 的 handoff/google-play-stepx/module/inject.py
  *   boot.py          同目录 module/boot.py 的衍生：加了只读探测槽位与 rootfd 入参
  *   boot-adapter.py  同目录 module/launcher.py 的衍生：STOCK 指向被保留的原厂原件
- *   recover / repair / read-last / deploy* / stepx-fix.sh   本项目自有
+ *   recover / repair / read-last / deploy*   本项目自有
  * </pre>
  * 上游以 AGPL-3.0-only 发布，因此整个应用按同一许可对待。改载荷前先读 docs/DESIGN.md §20。
  */
@@ -29,23 +29,16 @@ final class Payload {
 
     /** 要落到设备上的文件；顺序即写入顺序（boot-adapter 最后）。 */
     static final String[] DEPLOY = {
-            "boot.py", "inject.py", "recover.py", "repair.py", "boot-adapter.py",
+            "boot.py", "inject.py", "recover.py", "repair.py", "play-compat.py", "boot-adapter.py",
     };
 
     /** 只在容器 /tmp 里跑、不落 /usr/local 的辅助脚本。 */
     static final String RUNNER = "deploy-run.py";
     static final String DEPLOY_SCRIPT = "deploy.py";
     static final String READ_LAST = "read-last.py";
-
-    /**
-     * 兜底脚本，落到 /sdcard（不是 /usr/local）。
-     *
-     * 它和 DEPLOY 那批不是一回事：那些是注入链路的一部分，落容器里；
-     * 这个是在「app 被卸载 / Shizuku 起不来 / 手上只剩一台电脑」时，
-     * 还能用任意 shell 工具跑 `sh /sdcard/stepx-fix.sh` 自救。
-     * 所以它必须留在用户够得着的地方，而不是 root 才读得到的目录。
-     */
-    static final String FALLBACK = "stepx-fix.sh";
+    /** 认证修补：布置标记 / 取回结果。都借同一条 apt 提权通道跑一次。 */
+    static final String ARM_COMPAT = "arm-play-compat.py";
+    static final String READ_COMPAT = "read-compat.py";
 
     private Payload() { }
 

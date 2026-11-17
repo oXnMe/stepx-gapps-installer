@@ -22,10 +22,10 @@ BIN = '/usr/local/bin'
 LIB = '/usr/local/lib/stepx-gms'
 VAR = '/var/lib/stepx-gms'
 ZYGOTE = BIN + '/ubuntu_zygote'
-# 名字里的日期只是历史遗留的槽位名，不是「只备份那一天的原厂件」——
-# 它会随 OTA 刷新（见上面第二条约束）。改名要连 boot-adapter.py 一起动，
-# 那是开机路径，不划算。
-STOCK = BIN + '/ubuntu_zygote.stepx-stock-20261021'
+# 槽位名不带日期：它跟「备份的是哪天固件」无关，写死一个日期只会在别的机器上变成假信息。
+# LEGACY 是上一版的名字，只为了已经部署过的机器不用重来一遍。
+STOCK = BIN + '/ubuntu_zygote.stepx-stock'
+LEGACY = BIN + '/ubuntu_zygote.stepx-stock-20261021'
 STAGE = '/tmp/stepx-deploy'
 OUT = STAGE + '/out.txt'
 VERSION = '0.6'
@@ -35,6 +35,8 @@ FILES = [
     ('inject.py', LIB + '/inject.py', 0o644),
     ('recover.py', LIB + '/recover.py', 0o755),
     ('repair.py', LIB + '/repair.py', 0o700),
+    # 认证修补载荷：不在开机默认路径上，只在 probe 标记指向它时才被 boot.py 读起来
+    ('play-compat.py', LIB + '/play-compat.py', 0o644),
     ('boot-adapter.py', ZYGOTE, 0o755),
 ]
 
@@ -75,6 +77,54 @@ def archive(path):
     return dst
 
 
+MARK = b'/usr/local/lib/stepx-gms'
+
+
+def is_ours(path):
+    """这一份 ubuntu_zygote 是不是我们自己的适配器 —— 任何版本都算。
+
+    不能用 sha 和 APK 里那份比：适配器一改（哪怕只改一行注释），
+    设备上跑的还是旧适配器，sha 就不相等，于是看起来「这不是我们的东西」。
+    真正要区分的是「原厂 ELF 二进制」和「我们的 python 适配器」，
+    所以看文件头里那个固定路径就够了。
+    """
+    try:
+        with open(path, 'rb') as stream:
+            return MARK in stream.read(4096)
+    except OSError:
+        return False
+
+
+def recover_stock():
+    """STOCK 里躺着我们的适配器时，从 archive 里把真正的原厂件找回来。
+
+    历史 bug（v0.32 之前）：适配器一更新，上面的 sha 比较就会失配，
+    deploy 以为 ZYGOTE 是原厂件，于是「把旧适配器备份成 STOCK」，
+    真原厂件被挤进 archive。原厂件没丢，按 mtime 取最新的一份非适配器放回去。
+    """
+    best, best_at = None, -1
+    try:
+        names = os.listdir(BIN)
+    except OSError:
+        return None
+    for name in names:
+        if not name.startswith('ubuntu_zygote.stepx-stock-'):
+            continue
+        path = os.path.join(BIN, name)
+        if os.path.abspath(path) == os.path.abspath(STOCK) or is_ours(path):
+            continue
+        try:
+            at = os.path.getmtime(path)
+        except OSError:
+            continue
+        if at > best_at:
+            best, best_at = path, at
+    if best is None:
+        return None
+    put(best, STOCK, 0o755)
+    return best
+
+
 ok = True
 try:
     for path, mode in ((LIB, 0o755), (VAR, 0o700)):
@@ -86,12 +136,36 @@ try:
 
     current = sha(ZYGOTE)
     adapter = sha(STAGE + '/boot-adapter.py')
+    zygote_ours = is_ours(ZYGOTE)
+
+    # 老机器上备份还叫 …-20261021。两种名字都认，但**绝不改名**：
+    # 改名会让此刻正在跑的那份旧适配器找不到自己的 STOCK —— 旧适配器是写死
+    # 旧名的，rename 之后它 execv 一个已经不在的路径，openclaw 容器直接起不来
+    # （v0.32 在真机上踩过：改名的同一秒，容器被重启，然后就再也起不来了）。
+    if not os.path.exists(STOCK) and os.path.exists(LEGACY):
+        STOCK = LEGACY
+        say('use legacy stock ' + STOCK)
+
+    # STOCK 里如果是我们的适配器，说明被历史上那个 bug 顶替过（见 recover_stock）——
+    # 先原厂件找回来，再往下判定。
+    if os.path.exists(STOCK) and is_ours(STOCK):
+        back = recover_stock()
+        say('recover ' + (back or '失败') + ' -> ' + STOCK + '（备份曾被适配器顶替）'
+            if back else 'warn STOCK 里是我们的适配器，archive 里也没有原厂件可找回')
+
     if current is None:
         say('warn 找不到 ' + ZYGOTE + '，没有可备份的原厂二进制')
         ok = False
     elif adapter is not None and current == adapter:
         if not os.path.exists(STOCK):
             say('warn ubuntu_zygote 已经是本适配器，但 stock 备份不在；原厂二进制已无处可取')
+    elif zygote_ours:
+        # 设备上跑的是**旧版本**的适配器：这只说明载荷更新了，原厂件事先已经备份过。
+        # 这里绝不能走下面的 archive + put —— 那会把旧适配器当成原厂件写进 STOCK。
+        if not os.path.exists(STOCK):
+            say('warn ubuntu_zygote 是本适配器的旧版本，但 stock 备份不在；原厂二进制已无处可取')
+        else:
+            say('skip stock（设备上是旧版适配器，原厂备份保持不动）')
     elif not os.path.exists(STOCK):
         put(ZYGOTE, STOCK, 0o755)
         say('backup ' + ZYGOTE + ' -> ' + STOCK)

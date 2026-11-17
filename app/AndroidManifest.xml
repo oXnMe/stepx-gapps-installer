@@ -9,8 +9,7 @@
         android:label="GApps 安装器"
         android:icon="@mipmap/ic_launcher"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
-        android:usesCleartextTraffic="true"
-        android:debuggable="true">
+        android:usesCleartextTraffic="true">
 
         <!--
           uiMode 自己处理：界面全部代码绘制，系统切夜间模式时如果让 Activity 重建，

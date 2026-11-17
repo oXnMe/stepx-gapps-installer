@@ -55,6 +55,8 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
 
     private static final String PREF = "stepx";
     private static final String KEY_THEME = "theme_mode";   // 0 跟随 1 浅 2 深
+    /** 上次认证修补成功的时间戳（毫秒）。0 = 从没修补过。 */
+    private static final String KEY_PATCH_AT = "patch_at";
 
     // 下载源里钉死的是「验证过的那三个版本」，不是各包的列表页 ——
     // 列表页让人自己从几十个变体里挑，挑错一个（arm64 变成 armeabi、nodpi 变成 480dpi）
@@ -88,11 +90,19 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
     private static final int C_BATT = 8;
     private static final int C_BINDER = 9;
     private static final int C_CERT = 10;
-    private static final int C_FALLBACK = 11;
+    /**
+     * 容器网关（127.0.0.1:18789）在不在。
+     *
+     * 这一格原来放的是「上次修补时间」，而那个信息已经并进 CERT 那格了 ——
+     * 修补状态本来就该跟着认证一起看。空出来的位置给网关：它是部署、注入、
+     * 认证修补三条路的唯一提权入口，容器一挂全都做不了，而 SHIZUKU/SHELL
+     * 这些格子照样全绿 —— 真机上就是这么被骗过一次（12/12 全正常）。
+     */
+    private static final int C_GATEWAY = 11;
 
     private static final String[] CELLS = {
             "SHIZUKU", "SHELL", "GSF", "GMS", "PLAY", "PLAY·PERM",
-            "GMS·PERM", "DL·VPN", "BATTERY", "BINDER", "CERT", "FALLBACK",
+            "GMS·PERM", "DL·VPN", "BATTERY", "BINDER", "CERT", "GATEWAY",
     };
 
     private static final int ACT_ROWS = 3;
@@ -129,9 +139,10 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
     /** 一次状态探测的结果。没 shell 时只有 shell=false，其余为 null。 */
     private static final class Probe {
         boolean shell;
+        /** 网关在不在。null = 还没探过（重建界面时重放用）。 */
+        Boolean gw;
         SelfHeal.Status st;
         Map<String, Long> ver;
-        long fallbackBytes;
         long at;
         String err;
     }
@@ -154,7 +165,9 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
     private View bInst;
     private View bInject;
     private View bFix;
-    private View bGuide;
+    private View bRoll;   // 回滚认证修补；原来这个位置是「下载源」，那份内容并进了选包窗口
+    /** 只在 busy 时出现：卡住的时候得有地方点，不然只能杀进程。 */
+    private TextView bStop;
 
     /** 活动区（里程碑）与全量日志走两个队列，活动区的内容是全量的严格子集。 */
     private final List<Line> hist = new ArrayList<>();
@@ -211,6 +224,8 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
     private int goodCount;
 
     private volatile boolean busy;
+    /** 当前任务线程：只给「停止等待」用，其余地方不读它。 */
+    private volatile Thread taskThread;
     private volatile boolean probing;
     private boolean flowArmed;
 
@@ -362,7 +377,9 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         bInst = Ui.button(this, "安装", Ui.GHOST);
         bInject = Ui.button(this, "注入", Ui.GHOST);
         bFix = Ui.button(this, "修复", Ui.GHOST);
-        bGuide = Ui.button(this, "下载源", Ui.GHOST);
+        // 认证相关的两个动作（打补丁 / 回滚）放在同一个入口里 ——
+        // 它们是一件事的两头，分两个按钮容易让人「补丁打坏了却找不到退路」。
+        bRoll = Ui.button(this, "认证", Ui.GHOST);
 
         bPick.setOnClickListener(v -> {
             // 这里原来有一条「已经选齐了就直接跳选择器」的捷径，去掉了：
@@ -375,9 +392,9 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         bInst.setOnClickListener(v -> runTask("安装三件套", this::doInstall));
         bInject.setOnClickListener(v -> runTask("部署 + 注入", this::doInject));
         bFix.setOnClickListener(v -> runTask("一键修复", this::doFix));
-        bGuide.setOnClickListener(v -> showGuide());
+        bRoll.setOnClickListener(v -> showCertSheet());
 
-        root.addView(Ui.row(this, dp(8), bPick, bInst, bInject, bFix, bGuide),
+        root.addView(Ui.row(this, dp(8), bPick, bInst, bInject, bFix, bRoll),
                 Ui.lp(dp(44), dp(8)));
 
         setContentView(root);
@@ -544,6 +561,10 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
             for (int j = 0; j < cols && i + j < CELLS.length; j++) {
                 CellView cv = new CellView(CELLS[i + j]);
                 cells.add(cv);
+                // 十二格全是读数，一格都不可点。
+                // CERT 那格原来能点开修补弹窗 —— 但「状态格可点」这件事本身没提示，
+                // 用户不会去戳一个数字，而且把「被拦截」和「现在修补」混成了同一个动作。
+                // 修补已经并进「修复」按钮的菜单，格子回到只报状态。
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(CELL_H), 1f);
                 if (j > 0) lp.setMarginStart(dp(7));
                 row.addView(cv.root, lp);
@@ -583,6 +604,18 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         about.setBackground(Ui.ripple(Ui.round(0x00000000, dp(6)), th.ripple));
         about.setOnClickListener(v -> About.show(this));
         bar.addView(about, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // 停止只在有任务时出现。放这一排而不是底部：底部那排会被 busy 整体禁掉，
+        // 而这正是唯一需要它的时刻。
+        bStop = Ui.text(this, "停止等待", 11.5f, th.warn, true);
+        bStop.setIncludeFontPadding(false);
+        bStop.setPadding(dp(8), dp(3), dp(6), dp(3));
+        bStop.setClickable(true);
+        bStop.setBackground(Ui.ripple(Ui.round(0x00000000, dp(6)), th.ripple));
+        bStop.setOnClickListener(v -> stopWaiting());
+        bStop.setVisibility(busy ? View.VISIBLE : View.GONE);
+        bar.addView(bStop, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView open = Ui.text(this, "诊断 \u203A", 11.5f, th.brand, true);
@@ -794,11 +827,12 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
     }
 
     private void applyBusy() {
+        if (bStop != null) bStop.setVisibility(busy ? View.VISIBLE : View.GONE);
         Ui.enabled(bFlow, !busy);
         Ui.enabled(bPick, !busy);
         Ui.enabled(bInject, !busy);
         Ui.enabled(bFix, !busy);
-        Ui.enabled(bGuide, !busy);
+        Ui.enabled(bRoll, !busy);
         Ui.enabled(bInst, !busy && canInstall());
     }
 
@@ -817,15 +851,15 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
 
         new Thread(() -> {
             Probe p = new Probe();
+            // 网关和 shell 是两条独立的路：Shizuku 好好的、shell 也能用，容器却可能已经
+            // 死了 —— 那时部署、注入、认证修补一律失效，而十二格里只有这一格会红。
+            p.gw = Gateway.ping();
             try {
                 Shell sh = Shell.pick();
                 p.shell = sh.ready();
                 if (p.shell) {
                     p.st = SelfHeal.snapshot(sh);
                     p.ver = Installer.versions(sh);
-                    Shell.Exec e = sh.exec(
-                            "stat -c %s /sdcard/stepx-fix.sh 2>/dev/null || echo 0", 30);
-                    p.fallbackBytes = parseLong(e.out.trim());
                 }
             } catch (Throwable t) {
                 p.err = String.valueOf(t);
@@ -850,6 +884,21 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
      * @param announce 是否往日志写「状态已刷新」。只有真的探测完才写，
      *                 重建界面时重放不写 —— 不然切一次主题就多一条重复记录。
      */
+    /**
+     * 网关那一格。三态：没探过 / 通 / 不通。
+     *
+     * 不写端口号：写出来除了让人去浏览器里试，没有别的用处；诊断里会写全。
+     */
+    private void paintGateway(Probe p) {
+        if (p == null || p.gw == null) {
+            setCell(C_GATEWAY, th.sub, "—");
+        } else if (p.gw) {
+            setCell(C_GATEWAY, th.ok, "可用");
+        } else {
+            setCell(C_GATEWAY, th.bad, "不通", "提权断");
+        }
+    }
+
     private void paint(Probe p, boolean announce) {
         goodCount = 0;
         refreshBadge();
@@ -871,9 +920,13 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
             setCell(C_SHIZUKU, th.bad, "不可用");
         }
 
+        // 网关独立于 shell，先画：容器挂掉的时候 Shizuku 和 shell 往往都是好的，
+        // 只看「SHELL 可用」会以为一切正常（真机上就被骗过）。
+        paintGateway(p);
+
         if (!p.shell) {
             setCell(C_SHELL, th.bad, "不可用");
-            for (int i = C_GSF; i <= C_FALLBACK; i++) setCell(i, th.sub, "—");
+            for (int i = C_GSF; i <= C_CERT; i++) setCell(i, th.sub, "—");
             // 「无 shell」把三种完全不同的处境糊成一句话，用户不知道该修哪一步。
             // 拆开说：服务没起 / 起来了没授权 / 授权了但后端仍不可用。
             boolean binder = pingBinder();
@@ -922,6 +975,9 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
                 play > 0 ? "v" + play : "未安装",
                 play > 0 ? (playUp ? "在跑" : "空闲") : null);
 
+        // 上次打过补丁没有：只当 CERT 那格的注脚用，不再单独占一格。
+        long patchAt = prefs == null ? 0L : prefs.getLong(KEY_PATCH_AT, 0L);
+
         if (st == null) {
             for (int i = C_PERM_PLAY; i <= C_CERT; i++) setCell(i, th.sub, "—");
         } else {
@@ -938,12 +994,13 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
             } else {
                 setCell(C_BINDER, st.dead > 10 ? th.bad : th.warn, st.dead + "/" + st.total, "dead");
             }
+            // 修补状态并进 CERT：note 只说「打过没打过」，颜色和数值仍然由 Play
+            // 此刻拦不拦决定 —— 不再各自派生「待修补/已修补」两套话，也就不会
+            // 两格一起变红、看着像两处故障。
             setCell(C_CERT, st.cert.isEmpty() ? th.ok : th.bad,
-                    st.cert.isEmpty() ? "未拦截" : "被拦截");
+                    st.cert.isEmpty() ? "未拦截" : "被拦截",
+                    patchAt > 0 ? "已补" : "未补");
         }
-
-        setCell(C_FALLBACK, p.fallbackBytes > 0 ? th.ok : th.warn,
-                p.fallbackBytes > 0 ? kb(p.fallbackBytes) : "缺失");
 
         int total = cells.size();
         // 右上角除了计数，还要回答「那我现在该按哪个」。计数只说「有几格不对」，
@@ -965,10 +1022,34 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
             scanSum.setTextColor(goodCount == total ? th.ok : th.warn);
         }
 
+        // 网关不通时上面那套计数会显得「只差一格」—— 实际是整条提权通道没了：
+        // 部署、注入、认证修补一件都做不成，只有装包还能用。这时结论要盖过计数。
+        boolean gwDown = Boolean.FALSE.equals(p.gw);
+        if (gwDown) {
+            if (statusSummary != null) {
+                statusSummary.setText("网关不通 · 只能装包");
+                statusSummary.setTextColor(th.bad);
+            }
+            if (scanSum != null) {
+                scanSum.setText("NO GATEWAY");
+                scanSum.setTextColor(th.bad);
+            }
+        }
+
         // 十二项体检全文只进诊断，不占活动区；同样只在真探测时写一次
         if (announce && st != null) SelfHeal.show(st, quiet);
         if (announce) {
-            if (verdict == SelfHeal.V_OK) {
+            // 补丁时间挪出格子后还得能查到：它说明「这一台手工动过什么」
+            detail("认证补丁 " + (patchAt > 0
+                    ? fmt("yyyy-MM-dd HH:mm", patchAt) : "从没打过")
+                    + " · 只关 Play 本地拦截页，搜索/结账仍是服务端判定",
+                    patchAt > 0 ? OK : INFO);
+
+            if (gwDown) {
+                line("容器网关不通 · 部署 / 注入 / 认证修补都做不了（装包不受影响）", BAD);
+                detail("网关 127.0.0.1:18789 无响应；它由 StepOS 的 openclaw 容器提供，"
+                        + "容器没起来时本机没有任何提权入口", BAD);
+            } else if (verdict == SelfHeal.V_OK) {
                 line("状态 " + goodCount + "/" + total + " 全正常", OK);
             } else {
                 // 「缺哪格」不写在这儿（格子自己会说），这句只回答下一步做什么。
@@ -1180,7 +1261,9 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         // 报告是给别人看的：他第一眼要知道「这机器该按哪个按钮」，而不是自己去读
         // 十二格和十一项。
         int vd = last == null ? SelfHeal.V_OK : SelfHeal.verdict(last.st);
-        b.append("下一步   ").append(vd == SelfHeal.V_OK ? "不用动"
+        boolean gwDead = last != null && Boolean.FALSE.equals(last.gw);
+        b.append("下一步   ").append(gwDead ? "先恢复容器（网关不通，部署/注入/修补都做不了）"
+                : vd == SelfHeal.V_OK ? "不用动"
                 : SelfHeal.verdictWord(vd) + "（" + SelfHeal.verdictHow(vd) + "）").append('\n');
         b.append("已选     ").append(items.isEmpty() ? "0 个文件" : items.size() + " 个文件").append('\n');
         b.append("最近错误 ").append(lastBad == null ? "无" : lastBad).append('\n');
@@ -1311,6 +1394,12 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
     private String stateWord() {
         if (last == null) return "未探测";
         if (last.err != null) return "探测异常：" + last.err;
+        // 网关先于 shell 说：容器挂了的时候 shell 依然「可用」，
+        // 只报 shell 会让人以为这台机器没事（真机上被这么骗过一次）。
+        if (Boolean.FALSE.equals(last.gw)) {
+            return (last.shell ? "网关不通（部署/注入/修补做不了），" : "")
+                    + goodCount + "/" + cells.size() + " 正常";
+        }
         if (last.shell) return "shell 可用，" + goodCount + "/" + cells.size() + " 正常";
         if (!pingBinder()) return "Shizuku 未运行";
         if (!granted()) return "Shizuku 待授权";
@@ -1337,7 +1426,7 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         StringBuilder b = new StringBuilder();
         for (String n : Payload.DEPLOY) b.append("\n         ").append(n).append(' ')
                 .append(payloadSize(n));
-        for (String n : new String[]{Payload.DEPLOY_SCRIPT, Payload.FALLBACK}) {
+        for (String n : new String[]{Payload.DEPLOY_SCRIPT, Payload.ARM_COMPAT, Payload.READ_COMPAT}) {
             b.append("\n         ").append(n).append(' ').append(payloadSize(n));
         }
         return b.append('\n').toString();
@@ -1431,8 +1520,6 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
                 "echo aid=$(settings get secure android_id 2>/dev/null)",
                 "echo @state",
                 "cat " + SelfHeal.STATE + " 2>/dev/null",
-                "echo @fbk",
-                "stat -c '%s %y' " + Deploy.FALLBACK + " 2>/dev/null | cut -d. -f1",
                 "echo @pkg",
                 "dumpsys package " + SelfHeal.GMS + " 2>/dev/null "
                         + "| grep -oE 'versionName=[^ ]+|lastUpdateTime=[^ ]+' | head -3",
@@ -1457,7 +1544,6 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         b.append("进程     gms ").append(kv(f, "gms"))
                 .append(" · vending ").append(kv(f, "vending")).append('\n');
         b.append("状态文件 ").append(one(m.get("state"))).append('\n');
-        b.append("兜底脚本 ").append(one(m.get("fbk"))).append('\n');
         b.append("GMS 包   ").append(multi(m.get("pkg"), "         ")).append('\n');
         b.append("禁用的包 ").append(one(m.get("disabled"))).append('\n');
         // android_id 是网关 token 的原料，报告里只留两头，中间打码
@@ -1663,19 +1749,10 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         lastBad = null;
         Gateway gw = gateway(sh);
         if (gw == null) {
-            // 网关挂了，部署和注入都做不了 —— 但兜底脚本不需要网关，
-            // 而且恰恰是这时候最需要它。
-            long t = System.currentTimeMillis();
-            boolean fbk = Deploy.fallback(this, sh, quiet);
-            say("兜底", t, fbk ? "已落 " + Deploy.FALLBACK : "失败" + why(), fbk ? OK : BAD);
             line("网关不通 · 跳过部署和注入" + why(), WARN);
-            probe();
             return;
         }
         deployAndInject(sh, gw);
-        long t = System.currentTimeMillis();
-        boolean fbk = Deploy.fallback(this, sh, quiet);
-        say("兜底", t, fbk ? "已落 " + Deploy.FALLBACK : "失败" + why(), fbk ? OK : BAD);
         probe();
     }
 
@@ -1689,6 +1766,114 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         int rc = SelfHeal.repair(sh, gw, quiet);
         say("修复", t, explain(rc), rc == SelfHeal.OK ? OK : BAD);
         probe();
+    }
+
+    /**
+     * 「认证」按钮：Play 认证拦截的两个动作。
+     *
+     * 打补丁和回滚是一件事的两头，放在同一个入口里：
+     *   - 补丁清空 Play 本地的拦截清单（搜索/详情/结账那个整页提示）；
+     *   - 回滚把补丁改过的 cache 与 phenotype.db 恢复成打补丁之前。
+     *
+     * 原来补丁入口藏在 CERT 状态格里 —— 状态格看起来不可点，没人会去戳一个数字，
+     * 而且「被拦截」和「现在修补」被混成了同一个动作。分开之后：
+     * CERT 只报状态，动作都在这儿。
+     */
+    private void showCertSheet() {
+        Sheet s = new Sheet();
+        s.card.addView(Ui.text(this, "认证拦截", 17, th.text, true));
+
+        SelfHeal.Status st = last == null ? null : last.st;
+        boolean blocked = st != null && !st.cert.isEmpty();
+
+        TextView lead = Ui.text(this, blocked
+                        ? "现在被拦着。补丁会清空 Play 本地那份「未认证设备要拦哪些页面」的清单。"
+                        : "设备没过 Google 保护机制认证时，Play 会用本地清单把整页挡住。"
+                        + "现在没被拦，通常不需要补。",
+                12, th.sub, false);
+        lead.setLineSpacing(dp(3), 1f);
+        lead.setPadding(0, dp(6), 0, dp(12));
+        s.card.addView(lead);
+
+        // 修补和回滚都要经容器里的网关跑（Play 的进程身份只有它能给）。
+        // 网关不通时先说明白，别让人点下去才看见「网关无响应」。
+        boolean gwDead = last != null && Boolean.FALSE.equals(last.gw);
+        if (gwDead) {
+            TextView warn = Ui.text(this, "网关不通：修补与回滚都要经容器执行，现在点下去只会报错。"
+                    + "先把 StepOS 的智能体环境恢复起来。", 11.5f, th.bad, false);
+            warn.setLineSpacing(dp(2), 1f);
+            warn.setPadding(0, 0, 0, dp(10));
+            s.card.addView(warn);
+        }
+
+        View cert = actionRow(blocked ? "修补认证拦截 · 正被拦" : "修补认证拦截",
+                "会停掉 Play 并重启一次容器，约 40 秒 · 只关本地拦截页，搜索、Play Pass、"
+                        + "结账仍是服务端判定",
+                blocked, () -> {
+                    s.dlg.dismiss();
+                    doCertFix(false);
+                });
+        View back = actionRow("回滚到打补丁之前",
+                "把 cache 与 phenotype.db 恢复原样 · 拦截页会回来；没打过补丁时会提示没有可回滚的记录",
+                false, () -> {
+                    s.dlg.dismiss();
+                    doCertFix(true);
+                });
+
+        s.card.addView(cert, Ui.lp(ViewGroup.LayoutParams.WRAP_CONTENT, 0));
+        s.card.addView(back, Ui.lp(ViewGroup.LayoutParams.WRAP_CONTENT, dp(8)));
+
+        View cancel = Ui.button(this, "关闭", Ui.GHOST);
+        cancel.setOnClickListener(v -> s.dlg.dismiss());
+        s.card.addView(Ui.row(this, dp(8), cancel), Ui.lp(dp(46), dp(14)));
+        s.show();
+    }
+
+    /**
+     * 弹窗里的一个可选动作：标题 + 一行说明，整块可点。
+     *
+     * @param primary 当前更推荐的那一项，描边和标题走品牌色
+     */
+    private View actionRow(String title, String desc, boolean primary, Runnable go) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(14), dp(11), dp(14), dp(11));
+        box.setBackground(Ui.ripple(Ui.outline(primary ? soft(th.brand) : th.cardAlt,
+                dp(10), Math.max(1, dp(1)), primary ? th.brand : th.line), th.ripple));
+        box.setClickable(true);
+        box.addView(Ui.text(this, title, 14, primary ? th.brand : th.text, true));
+        TextView d = Ui.text(this, desc, 11, th.sub, false);
+        d.setLineSpacing(dp(2), 1f);
+        d.setPadding(0, dp(4), 0, 0);
+        box.addView(d);
+        box.setOnClickListener(v -> go.run());
+        return box;
+    }
+
+    /** @param rollback true = 回滚上次补丁，false = 打补丁 */
+    private void doCertFix(boolean rollback) {
+        String what = rollback ? "认证回滚" : "认证修补";
+        runTask(what, () -> {
+            Shell sh = needShell();
+            if (sh == null) return;
+            Gateway gw = gateway(sh);
+            if (gw == null) return;
+            lastBad = null;
+            long t = System.currentTimeMillis();
+            boolean ok = CertFix.run(this, sh, gw, loud, rollback);
+            if (ok && prefs != null) {
+                if (rollback) {
+                    // 回滚之后就不该再显示「上次修补」时间了 —— 那份补丁已经不在了
+                    prefs.edit().remove(KEY_PATCH_AT).apply();
+                } else {
+                    // 只记「做过」的时刻：当前有没有被拦永远看 CERT 那格，
+                    // 这里只是让 PATCH 格能说出「上次是哪天补的」。
+                    prefs.edit().putLong(KEY_PATCH_AT, System.currentTimeMillis()).apply();
+                }
+            }
+            say(what, t, ok ? "完成" : "没完成", ok ? OK : BAD);
+            probe();
+        });
     }
 
     private void startFlow() {
@@ -1720,7 +1905,7 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
     }
 
     private void flowBody(Shell sh) throws Exception {
-        detail("自检 → 装包 → 部署 → 兜底 → 注入 → 核对");
+        detail("自检 → 装包 → 部署 → 注入 → 核对");
         lastBad = null;
 
         long t = System.currentTimeMillis();
@@ -1770,15 +1955,8 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
             passed = deployAndInject(sh, gw);
         }
 
-        // 兜底脚本不需要网关，所以放在网关判断之外 —— 网关挂的时候它是唯一能用的手段
-        t = System.currentTimeMillis();
-        boolean fbk = Deploy.fallback(this, sh, quiet);
-        say("兜底", t, fbk ? "已落 " + Deploy.FALLBACK : "失败" + why(), fbk ? OK : BAD);
-
         if (!passed) {
-            line(fbk ? "没跑完 · 兜底脚本可用" : "没跑完 · 兜底也没落成", fbk ? WARN : BAD);
-        } else if (!fbk) {
-            line("全流程完成 · 兜底脚本没落成", WARN);
+            line("没跑完" + why(), BAD);
         } else {
             line("全流程完成", OK);
         }
@@ -1869,51 +2047,6 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
                 line("没取到包 · 换加速再试，或点「选包」", WARN);
             }
         });
-    }
-
-    /**
-     * 下之前先问走哪条路：GitHub 直连，还是经 gh-proxy 中转。
-     *
-     * 不自动切换是有意的 —— gh-proxy 是第三方反代，流量经过谁该由用户自己点头。
-     * 直连失败时日志里会提示换源，选择权留给人。
-     */
-    private void askSource() {
-        Sheet s = new Sheet();
-        Trio.Spec sp = Trio.spec(this);
-
-        s.card.addView(Ui.text(this, "三件套从哪下", 17, th.text, true));
-        TextView lead = Ui.text(this,
-                (sp.ok() ? "要下 " + Installer.mb(sp.download) + "。" : "")
-                        + "GitHub 直连下不动就换加速通道。",
-                12, th.sub, false);
-        lead.setLineSpacing(dp(3), 1f);
-        lead.setPadding(0, dp(6), 0, dp(14));
-        s.card.addView(lead);
-
-        View direct = Ui.button(this, "直连 GitHub", Ui.PRIMARY);
-        View proxy = Ui.button(this, "gh-proxy 加速", Ui.GHOST);
-        direct.setOnClickListener(v -> {
-            s.dlg.dismiss();
-            useOnline(false);
-        });
-        proxy.setOnClickListener(v -> {
-            s.dlg.dismiss();
-            useOnline(true);
-        });
-        s.card.addView(direct, Ui.lp(dp(46), 0));
-        s.card.addView(proxy, Ui.lp(dp(46), dp(8)));
-
-        // 说清「第三方」这件事：内容仍按清单里的 sha256 校验，换的只是能通不能通
-        TextView note = Ui.text(this, "加速经 gh-proxy.com 中转，包内容仍按清单校验 sha256。",
-                11, th.sub, false);
-        note.setLineSpacing(dp(3), 1f);
-        note.setPadding(0, dp(12), 0, 0);
-        s.card.addView(note);
-
-        View cancel = Ui.button(this, "取消", Ui.GHOST);
-        cancel.setOnClickListener(v -> s.dlg.dismiss());
-        s.card.addView(Ui.row(this, dp(8), cancel), Ui.lp(dp(46), dp(14)));
-        s.show();
     }
 
     /**
@@ -2053,10 +2186,34 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
     // ------------------------------ 弹窗 ------------------------------
 
     /**
+     * 给弹窗用的滚动容器：高度最多到屏幕的 86%，再高就在里面滚。
+     *
+     * 直接用 ScrollView 不行 —— 外层窗口是 wrap_content，内容多高它就多高，
+     * 溢出屏幕时窗口照样被切，滚动没有意义。这里把测量上限钉死，
+     * 窗口才真的会「到顶就停」。
+     */
+    private static final class SheetScroll extends android.widget.ScrollView {
+        private final int cap;
+
+        SheetScroll(android.content.Context c, int cap) {
+            super(c);
+            this.cap = cap;
+        }
+
+        @Override
+        protected void onMeasure(int w, int h) {
+            int capped = android.view.View.MeasureSpec.makeMeasureSpec(
+                    cap, android.view.View.MeasureSpec.AT_MOST);
+            super.onMeasure(w, capped);
+        }
+    }
+
+    /**
      * 弹窗外壳：透明窗口 + 一张圆角卡片。
      *
-     * 原来这段窗口配置是抄在 showGuide 里的，加第二个弹窗时必然抄第二遍；
-     * 抽出来之后两边只管往 card 里塞内容。
+     * 卡片外面套一层 ScrollView：选包那屏现在同时放着三件套的下载页入口和下载源，
+     * 小屏（或者大字体）上会顶出屏幕 —— 溢出时能滚，比裁掉按钮好。
+     * 内容装得下时 ScrollView 不产生任何视觉差异。
      */
     private final class Sheet {
         final android.app.Dialog dlg;
@@ -2073,7 +2230,13 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
             card.setOrientation(LinearLayout.VERTICAL);
             card.setPadding(dp(18), dp(18), dp(18), dp(16));
             card.setBackground(Ui.round(th.card, dp(18)));
-            shell.addView(card, new android.widget.FrameLayout.LayoutParams(
+
+            android.widget.ScrollView scroll = new SheetScroll(MainActivity.this,
+                    (int) (getResources().getDisplayMetrics().heightPixels * 0.86f));
+            scroll.setVerticalScrollBarEnabled(false);
+            scroll.addView(card, new android.widget.FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            shell.addView(scroll, new android.widget.FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             dlg.setContentView(shell);
         }
@@ -2112,27 +2275,64 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         Trio.Spec sp = Trio.spec(this);
 
         s.card.addView(Ui.text(this, "三件套从哪来", 17, th.text, true));
-        TextView lead = Ui.text(this, "在线获取只下用得上的三段；也可以自己选包。",
+        TextView lead = Ui.text(this,
+                "在线获取只下用得上的三段；也可以点条目自己去下载页拿，回来再选包。",
                 12, th.sub, false);
         lead.setLineSpacing(dp(3), 1f);
-        lead.setPadding(0, dp(6), 0, dp(14));
+        lead.setPadding(0, dp(6), 0, dp(12));
         s.card.addView(lead);
 
-        String[][] rows = {
-                {"1", "Google Services Framework", SelfHeal.GSF},
-                {"2", "Google Play services", SelfHeal.GMS},
-                {"3", "Google Play Store", SelfHeal.PLAY},
-        };
-        for (int i = 0; i < rows.length; i++) {
-            s.card.addView(pkgRow(rows[i][0], rows[i][1], rows[i][2]),
-                    Ui.lp(dp(44), i == 0 ? 0 : dp(6)));
+        // 这四行就是原来「下载源」窗口的全部内容：验证过的版本号 + 各自的下载页。
+        // 并到这儿是因为它和「在线获取」本来就是同一个决定 —— 想自己下的人，
+        // 和点「在线获取」的人，卡在同一个问题上：拿哪三个版本。
+        s.card.addView(linkRow("1", "Google Services Framework",
+                "16-15304122", URL_GSF, s.dlg), Ui.lp(dp(48), 0));
+        s.card.addView(linkRow("2", "Google Play services",
+                "26.44.63 · 260400", URL_GMS, s.dlg), Ui.lp(dp(48), dp(6)));
+        s.card.addView(linkRow("3", "Google Play Store",
+                "54.1.11 · 34-0 PR", URL_VENDING, s.dlg), Ui.lp(dp(48), dp(6)));
+        s.card.addView(linkRow("M", "MindTheGapps 16.0.0 arm64",
+                "整套 · 与「在线获取」同源", URL_MTG, s.dlg), Ui.lp(dp(48), dp(6)));
+
+        // 下载源：以前是点「在线获取」之后再弹一层问走哪条路，现在摊在这儿。
+        // 少一个窗口，也少了「选完才发现还有一步」。
+        s.card.addView(Ui.text(this, "下载源", 10, th.sub, true), Ui.lp(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(14)));
+
+        final TextView[] chips = {chip("直连 GitHub"), chip("gh-proxy 加速")};
+        // 点击只改选择，重画统一走 paintChips —— 少了这一步，胶囊会一直是
+        // 打开弹窗时那一副样子（点下去像没反应）。
+        chips[0].setOnClickListener(v -> {
+            dlProxy = false;
+            paintChips(chips);
+        });
+        chips[1].setOnClickListener(v -> {
+            dlProxy = true;
+            paintChips(chips);
+        });
+        LinearLayout src = new LinearLayout(this);
+        src.setOrientation(LinearLayout.HORIZONTAL);
+        for (int i = 0; i < chips.length; i++) {
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
+            if (i > 0) clp.setMarginStart(dp(8));
+            src.addView(chips[i], clp);
         }
+        paintChips(chips);
+        s.card.addView(src, Ui.lp(dp(38), dp(6)));
+
+        TextView tail = Ui.text(this,
+                "直连下不动就换加速。加速经 gh-proxy.com 中转，两条路的包都按清单校验 sha256。",
+                11, th.sub, false);
+        tail.setLineSpacing(dp(3), 1f);
+        tail.setPadding(0, dp(8), 0, 0);
+        s.card.addView(tail);
 
         if (sp.ok()) {
             TextView note = Ui.text(this, "下载 " + Installer.mb(sp.download) + "（装完即清）",
                     11.5f, th.sub, false);
             note.setLineSpacing(dp(2), 1f);
-            note.setPadding(0, dp(12), 0, 0);
+            note.setPadding(0, dp(6), 0, 0);
             s.card.addView(note);
         }
 
@@ -2151,8 +2351,8 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         use.setOnClickListener(v -> {
             went[0] = true;
             s.dlg.dismiss();
-            // 先问走哪条路，再开始下 133MB
-            askSource();
+            // 通道已经在这一屏选好了，直接开始下 133MB
+            useOnline(dlProxy);
         });
         s.card.addView(Ui.row(this, dp(8), cancelBtn, ok, use), Ui.lp(dp(46), dp(16)));
 
@@ -2164,75 +2364,26 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         s.show();
     }
 
-    /** 弹窗里的一行「序号 + 名称 + 包名」，纯说明用，不可点。 */
-    private View pkgRow(String no, String name, String pkg) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(12), 0, dp(12), 0);
-        row.setBackground(Ui.outline(th.cardAlt, dp(10), Math.max(1, dp(1)), th.line));
-
-        TextView n = Ui.text(this, no, 11.5f, th.brand, true);
-        n.setGravity(Gravity.CENTER);
-        n.setBackground(Ui.round(soft(th.brand), dp(8)));
-        row.addView(n, new LinearLayout.LayoutParams(dp(24), dp(24)));
-
-        LinearLayout mid = new LinearLayout(this);
-        mid.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout.LayoutParams midLp = new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        midLp.setMarginStart(dp(10));
-        mid.addView(Ui.text(this, name, 13, th.text, true));
-        TextView dsc = Ui.mono(this, pkg, 10.5f, th.sub, false);
-        dsc.setPadding(0, dp(2), 0, 0);
-        mid.addView(dsc);
-        row.addView(mid, midLp);
-        return row;
+    /** 下载源的一个胶囊。外观由 {@link #paintChips} 按当前选择统一画。 */
+    private TextView chip(String label) {
+        TextView t = Ui.text(this, label, 12.5f, th.text, true);
+        t.setGravity(Gravity.CENTER);
+        t.setSingleLine(true);
+        t.setClickable(true);
+        return t;
     }
 
-    // ------------------------------ 下载指引 ------------------------------
-
-    private void showGuide() {
-        Sheet s = new Sheet();
-        LinearLayout card = s.card;
-
-        card.addView(Ui.text(this, "自己下三个包", 17, th.text, true));
-        // 措辞不能写「本机验证过」—— 这份文案会跟着 APK 装到别人机器上，
-        // 对方的手机显然不是验证时那一台。
-        TextView lead = Ui.text(this, "这三个版本是验证过的组合，点条目去下载页，下完用「选包」装。",
-                12, th.sub, false);
-        lead.setLineSpacing(dp(3), 1f);
-        lead.setPadding(0, dp(6), 0, dp(14));
-        card.addView(lead);
-
-        card.addView(linkRow("1", "Google Services Framework",
-                "16-15304122", URL_GSF, s.dlg), Ui.lp(dp(56), 0));
-        card.addView(linkRow("2", "Google Play services",
-                "26.44.63 · 260400", URL_GMS, s.dlg), Ui.lp(dp(56), dp(8)));
-        card.addView(linkRow("3", "Google Play Store",
-                "54.1.11 · 34-0 PR", URL_VENDING, s.dlg), Ui.lp(dp(56), dp(8)));
-
-        // 整套包里三件套都有，但版本比上面三个旧。给想自己拆、或者想一次拿全的人留个口。
-        card.addView(Ui.text(this, "或整套", 10, th.sub, true), Ui.lp(
-                ViewGroup.LayoutParams.WRAP_CONTENT, dp(14)));
-        card.addView(linkRow("M", "MindTheGapps 16.0.0 arm64",
-                "整套 · 与「在线获取」同源", URL_MTG, s.dlg), Ui.lp(dp(56), dp(6)));
-
-        TextView tips = Ui.text(this,
-                "arm64-v8a · .apk / .apkm 都收\n"
-                        + "装完点「注入」，否则特权权限不会回来",
-                11.5f, th.sub, false);
-        tips.setLineSpacing(dp(4), 1f);
-        tips.setPadding(0, dp(16), 0, dp(16));
-        card.addView(tips);
-
-        View go = Ui.button(this, "关闭", Ui.PRIMARY);
-        go.setOnClickListener(v -> s.dlg.dismiss());
-        card.addView(Ui.row(this, dp(8), go), Ui.lp(dp(46), 0));
-
-        s.show();
+    private void paintChips(TextView[] chips) {
+        for (int i = 0; i < chips.length; i++) {
+            boolean on = (i == 1) == dlProxy;
+            chips[i].setTextColor(on ? 0xFFFFFFFF : th.text);
+            chips[i].setBackground(on ? Ui.round(th.brand, dp(9))
+                    : Ui.ripple(Ui.outline(th.cardAlt, dp(9), Math.max(1, dp(1)), th.line),
+                            th.ripple));
+        }
     }
 
+    /** 弹窗里的一行「序号 + 名称 + 版本」，点开该版本的下载页。 */
     private View linkRow(String no, String name, String desc, String url,
                          android.app.Dialog dlg) {
         LinearLayout row = new LinearLayout(this);
@@ -2355,7 +2506,10 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         busy = true;
         applyBusy();
         line("▶ " + title, STEP);
-        new Thread(() -> {
+        // 持有线程句柄，是为了让「停止」能真的打断等待循环 ——
+        // 系统卡死时 sh.exec 可能永远不返回，光靠各段自己检查标志位不够。
+        Thread worker = new Thread(() -> {
+            final Thread self = Thread.currentThread();
             try {
                 task.run();
             } catch (Throwable t) {
@@ -2365,13 +2519,39 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
                 line("出错了 · " + t + "（详情见诊断）", BAD);
             } finally {
                 runOnUiThread(() -> {
-                    busy = false;
-                    applyBusy();
+                    // 只清自己的状态：点过「停止等待」之后 busy 已经放开，
+                    // 用户可能已经开了新任务，别把它的状态踩掉。
+                    if (taskThread == self) {
+                        taskThread = null;
+                        busy = false;
+                        applyBusy();
+                    }
                     // then 必须等 busy 放开之后再跑，否则它里面再 runTask 会被挡住
                     if (then != null) then.run();
                 });
             }
-        }, "stepx-" + title).start();
+        }, "stepx-" + title);
+        taskThread = worker;
+        worker.start();
+    }
+
+    /**
+     * 停止等待。
+     *
+     * 只打断「等待/轮询」，不试图撤销已经发出去的操作：注入、重启容器这些
+     * 一旦开始就不会因为这条线程中断而回退，能撤回的是「界面继续陪着等」。
+     * 所以按钮上写的是「停止等待」而不是「取消」。
+     */
+    private void stopWaiting() {
+        Thread t = taskThread;
+        if (t == null) return;
+        t.interrupt();
+        // 立刻放开界面。sh.exec 卡在 binder 上时是打断不了的，那时还攥着 busy
+        // 就等于把用户锁死在「什么都点不动」里 —— 这才是真正要修的那件事。
+        taskThread = null;
+        busy = false;
+        applyBusy();
+        line("已停止等待 · 后台动作可能还在跑，稍后刷新状态看结果", WARN);
     }
 
     private int dp(float v) {
