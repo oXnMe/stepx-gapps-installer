@@ -162,12 +162,20 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
     /** 每个状态格最后一次写入的内容，诊断里按原样输出（下标与 CELLS 对齐）。 */
     private final String[] cellDump = new String[CELLS.length];
 
-    private View bFlow;
+    private TextView bFlow;
     private View bPick;
     private View bInst;
     private View bInject;
     private View bFix;
     private View bRoll;   // 回滚认证修补；原来这个位置是「下载源」，那份内容并进了选包窗口
+    /**
+     * 主按钮此刻代表哪件事。
+     *
+     * 「一键全流程」和「恢复三件套」是两条不同的意图：前者是装 + 部署 + 注入，
+     * 后者只要把被系统禁掉的包回装回来再补一次权限。面板已经知道是哪种情况，
+     * 按钮却还写着一样的字，用户就只能靠猜 —— 重启后最常见的故障正好是后者。
+     */
+    private boolean flowRecover;
     /** 只在 busy 时出现：卡住的时候得有地方点，不然只能杀进程。 */
     private TextView bStop;
 
@@ -390,7 +398,12 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         root.addView(activityCard(), cardLp);
 
         bFlow = Ui.button(this, "一键全流程", Ui.PRIMARY);
-        bFlow.setOnClickListener(v -> startFlow());
+        // 文案由面板决定（见 paint）：三件套被系统禁掉时它是「恢复三件套」，
+        // 点下去只走阶段 D + 重注入，不重复自检和装包。
+        bFlow.setOnClickListener(v -> {
+            if (flowRecover) runTask("恢复三件套", () -> doFix("恢复"));
+            else startFlow();
+        });
         root.addView(bFlow, Ui.lp(dp(54), dp(10)));
 
         bPick = Ui.button(this, "选包", Ui.GHOST);
@@ -1059,6 +1072,17 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
             }
         }
 
+        // 主按钮跟着面板走。三件套被 StepOS 禁掉时，用户要的是「把这三个恢复回来」，
+        // 不是从头跑一遍自检 → 取包 → 装包 → 部署 —— 那条路最后也是走到阶段 D，
+        // 只是多花几十秒，还容易在半路停下问要不要下载。
+        // 网关不通时保持原样：恢复必须重注入，提权通道没通改了也做不到。
+        boolean off = SelfHeal.anyOff(st);
+        flowRecover = off && !gwDown;
+        if (bFlow != null) {
+            String want = flowRecover ? "恢复三件套" : "一键全流程";
+            if (!want.contentEquals(bFlow.getText())) bFlow.setText(want);
+        }
+
         // 十二项体检全文只进诊断，不占活动区；同样只在真探测时写一次
         if (announce && st != null) SelfHeal.show(st, quiet);
         if (announce) {
@@ -1072,6 +1096,10 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
                 line("容器网关不通 · 部署 / 注入 / 认证修补都做不了（装包不受影响）", BAD);
                 detail("网关 127.0.0.1:18789 无响应；它由 StepOS 的 openclaw 容器提供，"
                         + "容器没起来时本机没有任何提权入口", BAD);
+            } else if (flowRecover) {
+                // 这条不写「点修复」：修复按钮和主按钮做的是同一件事，但主按钮更大、
+                // 上面就写着「恢复三件套」，指过去更直接。
+                line(SelfHeal.offNames(st) + " 被系统禁用 · 点「恢复三件套」", WARN);
             } else if (verdict == SelfHeal.V_OK) {
                 line("状态 " + goodCount + "/" + total + " 全正常", OK);
             } else {
@@ -1345,7 +1373,9 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         // 十二格和十一项。
         int vd = last == null ? SelfHeal.V_OK : SelfHeal.verdict(last.st);
         boolean gwDead = last != null && Boolean.FALSE.equals(last.gw);
+        boolean off = last != null && SelfHeal.anyOff(last.st);
         b.append("下一步   ").append(gwDead ? "先恢复容器（网关不通，部署/注入/修补都做不了）"
+                : off ? "点「恢复三件套」（" + SelfHeal.offNames(last.st) + " 被禁用，需回装重置）"
                 : vd == SelfHeal.V_OK ? "不用动"
                 : SelfHeal.verdictWord(vd) + "（" + SelfHeal.verdictHow(vd) + "）").append('\n');
         b.append("已选     ").append(items.isEmpty() ? "0 个文件" : items.size() + " 个文件").append('\n');
@@ -1481,6 +1511,10 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         // 只报 shell 会让人以为这台机器没事（真机上被这么骗过一次）。
         if (Boolean.FALSE.equals(last.gw)) {
             return (last.shell ? "网关不通（部署/注入/修补做不了），" : "")
+                    + goodCount + "/" + cells.size() + " 正常";
+        }
+        if (last.shell && SelfHeal.anyOff(last.st)) {
+            return SelfHeal.offNames(last.st) + " 被系统禁用，"
                     + goodCount + "/" + cells.size() + " 正常";
         }
         if (last.shell) return "shell 可用，" + goodCount + "/" + cells.size() + " 正常";
@@ -1842,6 +1876,14 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
     }
 
     private void doFix() throws Exception {
+        doFix("修复");
+    }
+
+    /**
+     * @param word 结果行怎么称呼这件事。主按钮叫「恢复三件套」时这里也写「恢复」，
+     *             否则标题写「恢复三件套」、收尾写「修复 1m50s」，看着像两件事。
+     */
+    private void doFix(String word) throws Exception {
         Shell sh = needShell();
         if (sh == null) return;
         Gateway gw = gateway(sh);
@@ -1850,7 +1892,7 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         long t = System.currentTimeMillis();
         phase("修复中");
         int rc = SelfHeal.repair(sh, gw, quiet);
-        say("修复", t, explain(rc), rc == SelfHeal.OK ? OK : BAD);
+        say(word, t, explain(rc), rc == SelfHeal.OK ? OK : BAD);
         probe();
     }
 

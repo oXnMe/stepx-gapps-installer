@@ -29,6 +29,10 @@ Licensed under the GNU Affero General Public License v3.0 only (see LICENSE).
 
   本项目自有
     deploy.py  deploy-run.py  repair.py  recover.py  read-last.py  stepx-fix.sh
+    inject-enable.py       inject.py 的副本，只换掉内嵌 dex 与要加载的类名，
+                           注入骨架逐字节沿用上游；换进去的 stepx.EnableProbe
+                           是本项目自有代码（源码见 payload-src/）
+    payload-src/           探针 Java 源码与构建脚本（javac + d8 生成 dex）
     以及 app/src/ 下的全部 Java 代码。
 
 ===============================================================================

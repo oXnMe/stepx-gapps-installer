@@ -28,11 +28,14 @@ STOCK = BIN + '/ubuntu_zygote.stepx-stock'
 LEGACY = BIN + '/ubuntu_zygote.stepx-stock-20261021'
 STAGE = '/tmp/stepx-deploy'
 OUT = STAGE + '/out.txt'
-VERSION = '0.6'
+VERSION = '0.7'
 
 FILES = [
     ('boot.py', LIB + '/boot.py', 0o644),
     ('inject.py', LIB + '/inject.py', 0o644),
+    # 开机解禁载荷：boot.py 在注入之后跑它，把 StepOS 置成 enabled=2 的三件套
+    # 改回默认启用态。缺这个文件不影响注入，只是重启后要用户手点「恢复三件套」。
+    ('inject-enable.py', LIB + '/inject-enable.py', 0o644),
     ('recover.py', LIB + '/recover.py', 0o755),
     ('repair.py', LIB + '/repair.py', 0o700),
     # 认证修补载荷：不在开机默认路径上，只在 probe 标记指向它时才被 boot.py 读起来

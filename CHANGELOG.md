@@ -3,6 +3,28 @@
 发版时 `.github/workflows/build.yml` 会按 tag 名从这里取对应小节当作 Release 正文，
 取不到就回落到一段通用说明。新增版本在文件顶部追加，标题保持 `## vX.Y` 一行。
 
+## v0.34
+
+重启之后三件套不再需要人手点一次「恢复三件套」。
+
+**改进**
+
+- 开机注入完成后顺手解禁。StepOS 每次开机把 `GSF` / `GMS` / `Play` 写成 `enabled=2`
+  （`lastDisabledCaller: android`），而 shell 只能回滚自己禁过的包，`pm enable` 永久被拒 ——
+  过去只能靠回装整包绕开，或者由用户点一下按钮。现在注入载荷本身就在 `system_server` 里
+  以 uid 1000 的身份跑，带着 `CHANGE_COMPONENT_ENABLED_STATE`，直接把三个包写回默认启用态：
+  1 秒完成，不重装、不丢 GSF 数据，也不牵连 Play 的 `READ_GSERVICES` 授权。
+- 落地方式是第二份独立载荷 `inject-enable.py`（`inject.py` 的副本，只换内嵌 dex 与类名），
+  由 `boot.py` 在注入之后、硬超时之前跑一次。注入的契约校验一个字没动；解禁自己失败也不
+  影响这一轮的注入结论，记录里单独记在 `enable` 字段下。
+- 幂等：三个包本来就是启用态时只读不写，结果照样记 `ENABLE_RESULT ok=3 fail=0`；
+  调试通道（probe）不跑解禁，不顺手改包的启用态。
+
+**保底**
+
+- 注入硬超时（`system_server` 已经不对劲）时跳过解禁，避免再 attach 一次；
+  这种情况和以前一样——面板标红、主按钮改名「恢复三件套」，走同版本回装。
+
 ## v0.33
 
 长动作跑起来就能看见耗时，正常的机器不再被「核对没通过」判红。

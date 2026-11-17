@@ -195,7 +195,7 @@ final class SelfHeal {
 
     static int verdict(Status st) {
         if (st == null) return V_OK;
-        if (st.gsfOff() || st.gmsOff() || st.playOff()) return V_FIX;
+        if (anyOff(st)) return V_FIX;
         if (!st.permGms || !st.permPlay) return V_INJECT;
         if (!st.gmsAlive || st.dead > 10) return V_FIX;
         if (!st.fgsPlay) return V_FIX;
@@ -211,6 +211,28 @@ final class SelfHeal {
         }
     }
 
+    /**
+     * 三件套里有任何一个处在禁用态。
+     *
+     * StepOS 会在开机时把它们写成 enabled=2（lastDisabledCaller=android），
+     * 而 shell 回不去这个状态 —— 被 android 禁的包，只有 shell 禁的才轮得到它改。
+     * 唯一的解法是同版本回装（PMS 会把启用态重置成 0），所以这条不是「调一下」
+     * 就能好的毛病，界面上该把它当成一件独立的事来讲。
+     */
+    static boolean anyOff(Status st) {
+        return st != null && (st.gsfOff() || st.gmsOff() || st.playOff());
+    }
+
+    /** 哪几个被禁了。顺序固定 GSF → GMS → Play，回装也必须照这个顺序来。 */
+    static String offNames(Status st) {
+        if (st == null) return "";
+        StringBuilder sb = new StringBuilder();
+        if (st.gsfOff()) sb.append("GSF");
+        if (st.gmsOff()) sb.append(sb.length() == 0 ? "GMS" : " · GMS");
+        if (st.playOff()) sb.append(sb.length() == 0 ? "Play" : " · Play");
+        return sb.toString();
+    }
+
     /** 一句话原因，进活动区时要能自己说清为什么。 */
     static String verdictWhy(Status st, int v) {
         if (st == null || v == V_OK) return "";
@@ -218,7 +240,7 @@ final class SelfHeal {
             if (!st.permGms && !st.permPlay) return "GMS 和 Play 的特权权限都没了";
             return !st.permGms ? "GMS 的特权权限没了" : "Play 的特权权限没了";
         }
-        if (st.gsfOff() || st.gmsOff() || st.playOff()) return "有包被禁用";
+        if (anyOff(st)) return offNames(st) + " 被系统禁用";
         if (!st.gmsAlive) return "GMS 没在跑";
         if (st.dead > 10) return "GMS 的 binder 大面积失效";
         if (!st.fgsPlay) return "Play 的下载服务被拦";
@@ -266,7 +288,7 @@ final class SelfHeal {
         boolean need = force;
 
         // --- D. 包被禁用（重启后必现，必须先于权限处理）---
-        if (st.gsfOff() || st.gmsOff() || st.playOff()) {
+        if (anyOff(st)) {
             if (!fixDisabled(sh, st, r)) fail = true;
             need = true;
             st = snapshot(sh);           // 装完包权限变了，后面几步要按新状态判断
@@ -317,7 +339,7 @@ final class SelfHeal {
         Status f = snapshot(sh);
         show(f, r);
 
-        if (f.gsfOff() || f.gmsOff() || f.playOff()) {
+        if (anyOff(f)) {
             r.line("仍有包处于禁用态 —— 自动重置没成功。", Reporter.BAD);
             r.line("→ 进 设置 → 应用 → 对应应用 → 启用；或把同版本 APK 放进 " + APKS + "/ 再跑一次。",
                     Reporter.WARN);
@@ -370,7 +392,10 @@ final class SelfHeal {
 
     private static boolean fixDisabled(Shell sh, Status st, Reporter r) {
         r.line("", Reporter.INFO);
-        r.line("检测到包被 StepOS 禁用（开机自动写 enabled=2，lastDisabledCaller=android）", Reporter.WARN);
+        r.line("检测到包被系统禁用（" + offNames(st) + "）—— shell 改不回来，只能回装重置",
+                Reporter.WARN);
+        r.line("  被系统禁掉的包 shell 无权改回启用态（它只能改自己禁过的那些）；"
+                + "同版本回装会把启用态重置成 0，数据保留。", Reporter.INFO);
         boolean ok = true;
         boolean gsfRedone = false;
 

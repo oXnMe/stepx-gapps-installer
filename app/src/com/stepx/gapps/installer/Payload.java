@@ -29,7 +29,8 @@ final class Payload {
 
     /** 要落到设备上的文件；顺序即写入顺序（boot-adapter 最后）。 */
     static final String[] DEPLOY = {
-            "boot.py", "inject.py", "recover.py", "repair.py", "play-compat.py", "boot-adapter.py",
+            "boot.py", "inject.py", "inject-enable.py", "recover.py", "repair.py",
+            "play-compat.py", "boot-adapter.py",
     };
 
     /** 只在容器 /tmp 里跑、不落 /usr/local 的辅助脚本。 */
