@@ -21,31 +21,41 @@ def say(text):
 
 ok = True
 try:
-    shutil.copyfile(SRC, DST)
-    os.chmod(DST, 0o644)
-    with open(DST) as stream:
-        data = json.load(stream)
-    say('status ' + str(data.get('status')).lower())
-    say('identity ' + str(data.get('identity')))
-    say('target_pid ' + str(data.get('target_pid')))
-    say('detached ' + str(data.get('detached')).lower())
-    say('unix_time ' + str(data.get('unix_time')))
-    say('error ' + str(data.get('error') or '-'))
-    java = data.get('java_result') or ''
-    rows = java.splitlines()
-    checks = [r for r in rows if r.startswith('check ')]
-    bad = [r for r in checks if not r.rstrip().endswith('=0')]
-    say('head1 ' + (rows[0] if len(rows) > 0 else '-'))
-    say('head2 ' + (rows[1] if len(rows) > 1 else '-'))
-    say('checks ' + str(len(checks)))
-    say('checks_failed ' + str(len(bad)))
-    if data.get('status') != 'success':
-        ok = False
+    # 记录不存在是正常状态（重置后没注入过、本轮跳过注入），
+    # 报成异常会让上层把它当成「核对不通过」，整条流程无故标红。
+    if not os.path.exists(SRC):
+        say('state missing')
+        ok = None
+    else:
+        shutil.copyfile(SRC, DST)
+        os.chmod(DST, 0o644)
+        with open(DST) as stream:
+            data = json.load(stream)
+        say('status ' + str(data.get('status')).lower())
+        say('identity ' + str(data.get('identity')))
+        say('target_pid ' + str(data.get('target_pid')))
+        say('detached ' + str(data.get('detached')).lower())
+        say('unix_time ' + str(data.get('unix_time')))
+        say('error ' + str(data.get('error') or '-'))
+        java = data.get('java_result') or ''
+        rows = java.splitlines()
+        checks = [r for r in rows if r.startswith('check ')]
+        bad = [r for r in checks if not r.rstrip().endswith('=0')]
+        say('head1 ' + (rows[0] if len(rows) > 0 else '-'))
+        say('head2 ' + (rows[1] if len(rows) > 1 else '-'))
+        say('checks ' + str(len(checks)))
+        say('checks_failed ' + str(len(bad)))
+        # 这里不判 status：本脚本只负责「把记录读出来」，
+        # 记录本身好不好由调用方按字段判 —— 混在一起会让「读到了但上次没成功」
+        # 被报成「读取失败」，看不出到底是哪一步出了问题。
 except BaseException as error:
     say('fail ' + repr(error))
     ok = False
 
-say('RESULT ' + ('ok' if ok else 'fail'))
+if ok is None:
+    say('RESULT none')
+else:
+    say('RESULT ' + ('ok' if ok else 'fail'))
 
 text = '\n'.join(lines) + '\n'
 tmp = OUT + '.stepx-new'

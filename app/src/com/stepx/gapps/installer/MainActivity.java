@@ -11,6 +11,8 @@ import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.TextUtils;
@@ -78,34 +80,34 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
             "https://github.com/MindTheGapps/16.0.0-arm64/releases/tag/"
                     + "MindTheGapps-16.0.0-arm64-20261021_084306";
 
-    // 状态格：下标即布局顺序（两列，一行两个）
+    // 状态格：下标即布局顺序（三列，一行三个；见 statusGrid）
     private static final int C_SHIZUKU = 0;
     private static final int C_SHELL = 1;
-    private static final int C_GSF = 2;
-    private static final int C_GMS = 3;
-    private static final int C_PLAY = 4;
-    private static final int C_PERM_PLAY = 5;
-    private static final int C_PERM_GMS = 6;
-    private static final int C_VPN = 7;
-    private static final int C_BATT = 8;
-    private static final int C_BINDER = 9;
-    private static final int C_CERT = 10;
     /**
      * 容器网关（127.0.0.1:18789）在不在。
      *
-     * 这一格原来放的是「上次修补时间」，而那个信息已经并进 CERT 那格了 ——
-     * 修补状态本来就该跟着认证一起看。空出来的位置给网关：它是部署、注入、
-     * 认证修补三条路的唯一提权入口，容器一挂全都做不了，而 SHIZUKU/SHELL
-     * 这些格子照样全绿 —— 真机上就是这么被骗过一次（12/12 全正常）。
+     * 排在第一行：它是部署、注入、认证修补三条路的唯一提权入口，容器一挂全都做不了，
+     * 而 SHIZUKU/SHELL 这些格子照样全绿 —— 真机上就是这么被骗过一次（12/12 全正常）。
+     * 放在 GApps 那几格之前，出问题第一眼就落在它身上。
+     *
+     * 这一格原来放的是「上次修补时间」，那个信息已经并进 CERT 那格了 ——
+     * 修补状态本来就该跟着认证一起看。
      */
-    private static final int C_GATEWAY = 11;
+    private static final int C_GATEWAY = 2;
+    private static final int C_GSF = 3;
+    private static final int C_GMS = 4;
+    private static final int C_PLAY = 5;
+    private static final int C_PERM_PLAY = 6;
+    private static final int C_PERM_GMS = 7;
+    private static final int C_VPN = 8;
+    private static final int C_BATT = 9;
+    private static final int C_BINDER = 10;
+    private static final int C_CERT = 11;
 
     private static final String[] CELLS = {
-            "SHIZUKU", "SHELL", "GSF", "GMS", "PLAY", "PLAY·PERM",
-            "GMS·PERM", "DL·VPN", "BATTERY", "BINDER", "CERT", "GATEWAY",
+            "SHIZUKU", "SHELL", "GATEWAY", "GSF", "GMS", "PLAY",
+            "PLAY·PERM", "GMS·PERM", "DL·VPN", "BATTERY", "BINDER", "CERT",
     };
-
-    private static final int ACT_ROWS = 3;
 
     /** 状态格高度。和格子内部三行（标签/值/状态条）是绑定关系，只改一边会切字。 */
     private static final int CELL_H = 50;
@@ -174,6 +176,8 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
     private final StringBuilder full = new StringBuilder();
     /** 进度行上次写全量日志的时刻，用来节流 —— 逐块记会几秒刷几百行。 */
     private final Map<String, Long> tickAt = new java.util.HashMap<>();
+    /** 量活动区高度用的替身 TextView（builder 里懒建，不挂到界面上）。 */
+    private TextView probe;
 
     /**
      * 上次选的下载通道：true = 走 gh-proxy 中转。
@@ -229,6 +233,15 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
     private volatile boolean probing;
     private boolean flowArmed;
 
+    /** 计时行的身份。'\u0000' 打头，跟下载进度那些 key 不会撞。 */
+    private static final String LIVE_KEY = "\u0000live";
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    /** 当前阶段名（部署中 / 注入中 …），由各阶段自己写，计时行只负责把秒数拼上去。 */
+    private volatile String livePhase = "运行中";
+    private long liveStart;
+    /** 正在跑的计时器；null 表示没有任务在跑。 */
+    private Runnable liveTick;
+
     /** 本进程里是否已经自动弹过一次授权框。只防重复弹，手动点徽标不受它限制。 */
     private boolean askedGrant;
 
@@ -260,6 +273,13 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         line("就绪 · 点「一键全流程」", INFO);
         sweepCaches();
         probe();
+    }
+
+    @Override
+    protected void onDestroy() {
+        // 计时行挂在主线程 Handler 上，页面走了必须摘掉，否则它会攥着这一屏的 View 不放。
+        stopTicker();
+        super.onDestroy();
     }
 
     @Override
@@ -629,6 +649,9 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
 
         activity = Ui.mono(this, "", 11, th.text, false);
         activity.setLineSpacing(dp(2), 1f);
+        // 关掉字体上下留白：量高的替身（probeView）也关着它，两边口径必须一致，
+        // 否则量出来的比实际矮，最后一行又被切掉。
+        activity.setIncludeFontPadding(false);
         activity.setEllipsize(TextUtils.TruncateAt.END);
         // 高度定下来之后才知道能放几行，所以布局一变就重排一次
         activity.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
@@ -1139,7 +1162,10 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
             }
             Line l = new Line(s, level, fmt("HH:mm", now), key);
             if (at >= 0) {
-                hist.set(at, l);
+                // 一律挪到最末：中间插了里程碑之后，原地改会把计时行留在旧行上面，
+                // 界面看起来就像「跑到一半停了」。进度行本来就该贴着底部走。
+                hist.remove(at);
+                hist.add(l);
             } else {
                 hist.add(l);
                 if (hist.size() > 600) hist.remove(0);
@@ -1155,29 +1181,86 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
 
     private void renderActivity() {
         if (activity == null) return;
-        // 行数跟着卡片实际高度走：卡被 weight 撑多高就显示多少行。
-        // 写死行数在两种屏幕上都别扭 —— 大屏留一大片空，小屏又把最新一条裁掉。
-        int rows = ACT_ROWS;
-        if (activity.getHeight() > 0) {
-            int lh = Math.max(1, (int) (activity.getLineHeight() + dp(2)));
-            // 少算一行：getLineHeight() 不含字体上下留白，整除很容易多挤出半行，
-            // 界面上就是最后一行被卡腰裁断。宁可空一行，也不要半截字。
-            rows = Math.max(3, activity.getHeight() / lh - 1);
-        }
-        List<Line> tail = new ArrayList<>();
-        for (int i = hist.size() - 1; i >= 0 && tail.size() < rows; i--) {
+
+        // 候选行（从旧到新）。上限 40 足够填满任何屏幕，再多的也放不下。
+        List<Line> cand = new ArrayList<>();
+        for (int i = hist.size() - 1; i >= 0 && cand.size() < 40; i--) {
             Line l = hist.get(i);
             if (l.text.trim().isEmpty()) continue;
-            tail.add(0, l);
+            cand.add(0, l);
         }
+
+        int avail = activity.getHeight()
+                - activity.getPaddingTop() - activity.getPaddingBottom();
+        int width = activity.getWidth()
+                - activity.getPaddingLeft() - activity.getPaddingRight();
+
+        // 放不下就把最旧的丢掉，一直到整块排得下。
+        //
+        // 之前的错在于「按逻辑行数估容量」：一条长行在界面上会被折成两行，
+        // 估的时候却只当一行，于是总量必然超出，最后一行被拦腰切断 ——
+        // 真机截图里 "状态 12/12 全正常" 只剩上半截笔画，就是这么来的。
+        int keep = cand.size();
+        SpannableStringBuilder sb = buildActivity(cand, 0);
+        while (keep > 1) {
+            if (width <= 0 || avail <= 0) break;          // 还没测量出来，先按全量铺
+            sb = buildActivity(cand, cand.size() - keep);
+            if (needHeight(sb, width) <= avail) break;
+            keep--;
+        }
+        if (keep == 1) sb = buildActivity(cand, Math.max(0, cand.size() - 1));
+        activity.setText(sb);
+    }
+
+    /**
+     * 这段文字要占多高。
+     *
+     * 用一只不挂到界面上的同规格 TextView 去量，而不是自己拼 StaticLayout：
+     * StaticLayout 的行高和 TextView 实际画出来的总有零点几 dp 的差，
+     * 十来行攒下来正好把最后一行顶进「半行」区。真机上调了两次都对不上，
+     * 索性不再两套口径比数 —— 让 TextView 自己排一遍，量它的结果。
+     */
+    private int needHeight(CharSequence text, int width) {
+        if (text.length() == 0) return 0;
+        TextView probe = probeView();
+        probe.setText(text);
+        probe.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        return probe.getMeasuredHeight();
+    }
+
+    /** 量高用的替身：字号、字体、行距、字距全部跟活动区一致，只差没内容。 */
+    private TextView probeView() {
+        if (probe != null) return probe;
+        probe = new TextView(this);
+        probe.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, activity.getTextSize());
+        probe.setTypeface(activity.getTypeface());
+        probe.setTextScaleX(activity.getTextScaleX());
+        probe.setLetterSpacing(activity.getLetterSpacing());
+        probe.setLineSpacing(dp(2), 1f);
+        probe.setIncludeFontPadding(false);
+        probe.setPadding(0, 0, 0, 0);
+        // 不挂到界面上的 TextView 没有 LayoutParams，setText 里 checkForRelayout()
+        // 会直接 NPE（读 LayoutParams.width）。给一份占位的就行 —— 反正我们只读高度。
+        probe.setLayoutParams(new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return probe;
+    }
+
+    /** @param from 起始下标，比它更旧的候选行丢弃 */
+    private SpannableStringBuilder buildActivity(List<Line> cand, int from) {
         SpannableStringBuilder sb = new SpannableStringBuilder();
-        for (Line l : tail) {
+        for (int i = Math.max(0, from); i < cand.size(); i++) {
+            Line l = cand.get(i);
+            // 行间用分隔符，末尾不留 —— 结尾那个 '\n' 会多排出一个空行，
+            // 白占一行的位置，还容易把最后一行顶出去。
+            if (sb.length() > 0) sb.append('\n');
             int st = sb.length();
-            sb.append(l.hm).append(' ').append(clip(l.text)).append('\n');
+            sb.append(l.hm).append(' ').append(clip(l.text));
             sb.setSpan(new ForegroundColorSpan(th.tone(l.level)), st, sb.length(),
                     Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
-        activity.setText(sb);
+        return sb;
     }
 
     private static String clip(String s) {
@@ -1704,12 +1787,14 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
 
         lastBad = null;
         long t = System.currentTimeMillis();
+        phase("自检中");
         if (!Preflight.run(sh, quiet, getPackageName())) {
             line("自检没过" + why(), BAD);
             return;
         }
         say("自检", t, "通过", OK);
 
+        phase("安装中");
         Map<String, List<Installer.Item>> by = Installer.group(items, quiet);
         if (by == null) {
             line("装包没开始 · 分组失败" + why(), BAD);
@@ -1763,6 +1848,7 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         if (gw == null) return;
         lastBad = null;
         long t = System.currentTimeMillis();
+        phase("修复中");
         int rc = SelfHeal.repair(sh, gw, quiet);
         say("修复", t, explain(rc), rc == SelfHeal.OK ? OK : BAD);
         probe();
@@ -1860,6 +1946,7 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
             if (gw == null) return;
             lastBad = null;
             long t = System.currentTimeMillis();
+            phase(rollback ? "回滚中" : "修补中");
             boolean ok = CertFix.run(this, sh, gw, loud, rollback);
             if (ok && prefs != null) {
                 if (rollback) {
@@ -1886,6 +1973,7 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
                 // 在线包是默认来源，一键全流程不该停下来问「要不要下载」——
                 // 只有下不动（没网、存储不够、哈希不符）才退回选包。
                 // 通道沿用上次在「在线获取」里选的，没选过就是直连。
+                phase("取包中");
                 boolean got = onlineItems(dlProxy) != null;
                 if (!got) {
                     flowArmed = true;
@@ -1909,6 +1997,7 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         lastBad = null;
 
         long t = System.currentTimeMillis();
+        phase("自检中");
         if (!Preflight.run(sh, quiet, getPackageName())) {
             line("自检没过" + why(), BAD);
             return;
@@ -1916,6 +2005,7 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         say("自检", t, "通过", OK);
 
         t = System.currentTimeMillis();
+        phase("装包中");
         if (items.isEmpty()) {
             say("装包", t, "跳过 · 设备上已齐", OK);
         } else {
@@ -1964,6 +2054,7 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
 
     private boolean deployAndInject(Shell sh, Gateway gw) {
         long t = System.currentTimeMillis();
+        phase("部署中");
         if (!Deploy.run(this, sh, gw, quiet)) {
             line("部署失败" + why(), BAD);
             return false;
@@ -1973,6 +2064,7 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         SelfHeal.Status st = SelfHeal.snapshot(sh);
         boolean injected = false;
         t = System.currentTimeMillis();
+        phase("注入中");
         if (st.permPlay && st.permGms && st.gmsAlive) {
             say("注入", t, "跳过 · 权限已就位", OK);
         } else {
@@ -1982,9 +2074,14 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
             injected = true;
         }
         t = System.currentTimeMillis();
-        boolean ok = Deploy.checkLast(this, gw, sh, quiet, injected);
-        say("核对", t, ok ? "通过" : "没通过" + why(), ok ? OK : BAD);
-        return ok;
+        phase("核对中");
+        int rc = Deploy.checkLast(this, gw, sh, quiet, injected);
+        // 「没东西可核」和「核不过」是两种事：前者本轮根本没注入，
+        // 拿上一次的记录去判失败只会让面板 12/12 正常时流程却标红。
+        String word = rc == Deploy.CHECK_OK ? "通过"
+                : rc == Deploy.CHECK_SKIP ? "跳过 · 本轮没注入" : "没通过" + why();
+        say("核对", t, word, rc == Deploy.CHECK_FAIL ? BAD : OK);
+        return rc != Deploy.CHECK_FAIL;
     }
 
     // ------------------------------ 选包 / 在线包 / 导出 ------------------------------
@@ -2501,11 +2598,51 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         runTask(title, task, null);
     }
 
+    /**
+     * 长动作的计时行：从 0s 开始每半秒刷新一次，跑到哪一步由 {@link #phase} 说明。
+     *
+     * 部署、注入、修补动不动十几秒到一分钟，之前活动区在整段跑完之前一个字都不写，
+     * 用户看到的就是「点了没反应」—— 明明在干活，界面却像死了。
+     * 现在行随秒数长，至少能判断「还在动」和「真卡住了」。
+     */
+    private void startLive() {
+        liveStart = System.currentTimeMillis();
+        livePhase = "运行中";
+        stopTicker();
+        liveTick = new Runnable() {
+            @Override
+            public void run() {
+                tick(LIVE_KEY, dur(System.currentTimeMillis() - liveStart) + " · " + livePhase, STEP);
+                ui.postDelayed(this, 500);
+            }
+        };
+        ui.post(liveTick);
+    }
+
+    /** 换阶段名。下一个半秒的刷新就会带上它。 */
+    private void phase(String p) {
+        livePhase = p;
+    }
+
+    /** 收工：停表并把这行撤掉 —— 阶段结果那一行已经带了耗时，留着是两份时间打架。 */
+    private void stopLive() {
+        stopTicker();
+        tick(LIVE_KEY, null, INFO);
+    }
+
+    private void stopTicker() {
+        if (liveTick != null) {
+            ui.removeCallbacks(liveTick);
+            liveTick = null;
+        }
+    }
+
     private void runTask(String title, Task task, Runnable then) {
         if (busy) return;
         busy = true;
         applyBusy();
         line("▶ " + title, STEP);
+        startLive();
         // 持有线程句柄，是为了让「停止」能真的打断等待循环 ——
         // 系统卡死时 sh.exec 可能永远不返回，光靠各段自己检查标志位不够。
         Thread worker = new Thread(() -> {
@@ -2519,6 +2656,7 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
                 line("出错了 · " + t + "（详情见诊断）", BAD);
             } finally {
                 runOnUiThread(() -> {
+                    stopLive();
                     // 只清自己的状态：点过「停止等待」之后 busy 已经放开，
                     // 用户可能已经开了新任务，别把它的状态踩掉。
                     if (taskThread == self) {
@@ -2551,6 +2689,8 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         taskThread = null;
         busy = false;
         applyBusy();
+        // 计时行也要停 —— 否则界面放开了，表还在替一个已经放弃的任务数秒。
+        stopLive();
         line("已停止等待 · 后台动作可能还在跑，稍后刷新状态看结果", WARN);
     }
 

@@ -197,33 +197,62 @@ final class Deploy {
 
     // ------------------------------- 阶段 5 -------------------------------
 
+    /** 核对通过。 */
+    static final int CHECK_OK = 0;
+    /** 本轮没注入，没有属于本轮的结果可核 —— 只报告，不算失败。 */
+    static final int CHECK_SKIP = 1;
+    /** 该核的核不过。 */
+    static final int CHECK_FAIL = 2;
+
     /**
      * 阶段 5：核对注入记录。
      *
      * 判据来自 README §6.4：status=success、detached、target_pid 与当前 system_server 一致、
      * identity 与当前 boot_id 一致、java_result 的 check 行全部 =0。
      * 光看 dumpsys 两条权限不够 —— 权限在、但注入只做了一半的情况是存在的。
+     *
+     * fresh 决定这套判据是「验收」还是「回看」：
+     * fresh=true（本轮刚注入完）任一项对不上都是失败；
+     * fresh=false（权限已就位、本轮跳过注入）盘上只有上一次的记录，甚至一条都没有 ——
+     * 那不是本轮的结果，判失败会让整条流程标红，跟状态面板上 12/12 自相矛盾。
      */
-    static boolean checkLast(Context ctx, Gateway gw, Shell sh, Reporter r, boolean fresh) {
+    static int checkLast(Context ctx, Gateway gw, Shell sh, Reporter r, boolean fresh) {
         r.line("── 阶段 5：核对注入记录 ──", Reporter.STEP);
 
-        if (!prepareStage(gw, r)) return false;
-        if (!stage(gw, Payload.READ_LAST, Payload.read(ctx, Payload.READ_LAST), r)) return false;
-        if (!runAsRoot(gw, Payload.READ_LAST, Payload.RUNNER, r, "读取记录")) return false;
+        if (!prepareStage(gw, r)) return CHECK_FAIL;
+        if (!stage(gw, Payload.READ_LAST, Payload.read(ctx, Payload.READ_LAST), r)) return CHECK_FAIL;
+        if (!runAsRoot(gw, Payload.READ_LAST, Payload.RUNNER, r, "读取记录")) {
+            // 「没有记录」与「读失败」要分开：前者是没事可核，可以降级成跳过；
+            // 后者是提权通道或钩子出了问题，即便本轮没注入也得如实报红。
+            if (fresh || !"none".equals(lastResult)) return CHECK_FAIL;
+            r.line("  本轮没注入 · 盘上没有注入记录，无可核对项", Reporter.INFO);
+            return CHECK_SKIP;
+        }
 
         String bootId = sh.exec("cat /proc/sys/kernel/random/boot_id", 20).stdout().trim();
         String ssPid = sh.exec("pidof system_server", 20).stdout().trim();
         Map<String, String> kv = lastOut;
 
-        // fresh=true：刚注入完，pid / boot_id 必须是这次的，对不上就是注入没落到当前进程
-        // fresh=false：只是回看历史记录，对不上说明是上一次注入留下的，不算错
+        // fresh=false 时全部判据降级为提示：记录来自上一次注入，
+        // 它对不对说明的是「当时那一次」，不是「现在这台机器能不能用」。
+        boolean hard = fresh;
         boolean ok = true;
-        ok &= expect(r, "status", kv.get("status"), "success", true);
-        ok &= expect(r, "detached", kv.get("detached"), "true", true);
-        ok &= expect(r, "target_pid", kv.get("target_pid"), ssPid, fresh);
-        ok &= expect(r, "identity", shortId(kv.get("identity")), shortId(bootId), fresh);
-        ok &= expect(r, "java_result[0]", kv.get("head1"), "GRANT_RESULT", true);
-        ok &= expect(r, "java_result[1]", kv.get("head2"), "SYSTEM_GMS=true", true);
+
+        // 本轮没注入时，盘上的 last.json 未必是注入记录 —— 认证修补也会写它
+        // （status=compat）。对着它逐条念「期望 success」只会刷一堆看不懂的红黄字。
+        String status = kv.get("status");
+        if (!hard && !"success".equals(status)) {
+            r.line("  上一次的记录来自 " + (status == null ? "未知动作" : status)
+                    + "，不是注入记录，没有可核项", Reporter.INFO);
+            return CHECK_SKIP;
+        }
+
+        ok &= expect(r, "status", kv.get("status"), "success", hard);
+        ok &= expect(r, "detached", kv.get("detached"), "true", hard);
+        ok &= expect(r, "target_pid", kv.get("target_pid"), ssPid, hard);
+        ok &= expect(r, "identity", shortId(kv.get("identity")), shortId(bootId), hard);
+        ok &= expect(r, "java_result[0]", kv.get("head1"), "GRANT_RESULT", hard);
+        ok &= expect(r, "java_result[1]", kv.get("head2"), "SYSTEM_GMS=true", hard);
 
         String checks = kv.get("checks");
         String failed = kv.get("checks_failed");
@@ -231,18 +260,25 @@ final class Deploy {
         long bad = num(failed);
         boolean checksOk = n >= 120 && bad == 0;
         r.line("  check 行     : " + (checks == null ? "读不到" : n + " 条，失败 " + bad + " 条"),
-                checksOk ? Reporter.OK : Reporter.BAD);
-        ok &= checksOk;
+                checksOk ? Reporter.OK : (hard ? Reporter.BAD : Reporter.WARN));
+        if (hard) ok &= checksOk;
 
         String err = kv.get("error");
         if (err != null && !"-".equals(err)) {
             r.line("  注入记录的 error 字段：" + err, Reporter.WARN);
         }
-        return ok;
+
+        if (!hard) {
+            r.line("  本轮没注入 · 以上是上一次注入的记录，仅作参考", Reporter.INFO);
+            return CHECK_SKIP;
+        }
+        return ok ? CHECK_OK : CHECK_FAIL;
     }
 
     /** 上一次 root 脚本的键值输出，checkLast 要用。 */
     private static Map<String, String> lastOut = new LinkedHashMap<>();
+    /** 上一次 root 脚本的 RESULT 值：ok / fail / none。none = 脚本明确说「没有这个记录」。 */
+    private static String lastResult = "fail";
 
     private static boolean expect(Reporter r, String label, String got, String want, boolean hard) {
         boolean ok = got != null && got.equals(want);
@@ -278,6 +314,10 @@ final class Deploy {
     /** 跑一个 root 脚本：deploy.py / read-last.py，两者都按 out.txt 回传结果。 */
     private static boolean runAsRoot(Gateway gw, String script, String runner, Reporter r,
                                     String what) {
+        // 先清掉上一次的结论：通道没通、拉起失败、out.txt 空这几种情况会提前返回，
+        // 若留着旧的 RESULT=none，调用方会把「根本没跑起来」当成「没有记录」。
+        lastResult = "fail";
+        lastOut = new LinkedHashMap<>();
         clearOut(gw);
         r.line("  以 root 执行 " + script + " …", Reporter.INFO);
         Gateway.Resp resp = gw.run(new String[]{"/bin/sh", "-c",
@@ -305,12 +345,12 @@ final class Deploy {
         }
 
         boolean ok = false;
-        lastOut = new LinkedHashMap<>();
         for (String ln : text.split("\n")) {
             String s = ln.trim();
             if (s.isEmpty()) continue;
             if (s.startsWith("RESULT ")) {
-                ok = s.endsWith("ok");
+                lastResult = s.substring("RESULT ".length()).trim().toLowerCase();
+                ok = "ok".equals(lastResult);
                 continue;
             }
             if (s.startsWith("fail ")) {
@@ -333,8 +373,14 @@ final class Deploy {
             int i = s.indexOf(' ');
             if (i > 0) lastOut.put(s.substring(0, i), s.substring(i + 1).trim());
         }
-        r.line(ok ? "  " + what + "：成功" : "  " + what + "：失败",
-                ok ? Reporter.OK : Reporter.BAD);
+        if ("none".equals(lastResult)) {
+            // 脚本明确报告「没有这个记录」：既不是成功也不是失败，
+            // 用黄色让调用方自己决定要不要当回事（核对阶段会降级成「跳过」）。
+            r.line("  " + what + "：没有记录", Reporter.WARN);
+        } else {
+            r.line(ok ? "  " + what + "：成功" : "  " + what + "：失败",
+                    ok ? Reporter.OK : Reporter.BAD);
+        }
         return ok;
     }
 
