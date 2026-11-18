@@ -16,7 +16,7 @@ GMS 以普通应用身份运行，拿不到 priv-app 才有的 `MANAGE_USERS` / 
 |---|---|
 | 设备 | StepX Neo（PZ261A），Android 16 / StepOS |
 | 提权通道 | [Shizuku](https://shizuku.rikka.app/) |
-| 网络 | 只在「在线获取」时需要，约 133 MiB |
+| 网络 | 在线获取三件套、检查更新都需要联网，用自己的包离线安装则不用 |
 
 Shizuku 用无线调试自行激活，不需要电脑。
 

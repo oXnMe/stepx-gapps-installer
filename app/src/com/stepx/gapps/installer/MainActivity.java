@@ -113,6 +113,18 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
     private static final int CELL_H = 50;
 
     /**
+     * 版本钮的四种结果（外加「还没查」）。
+     *
+     * 只有这四种，是因为用户看这颗钮只需要知道一件事：要不要点它。
+     * 取不到版本号也算一种明确结果 —— 用红点说话，比沉默着停在「未知」强。
+     */
+    private static final int V_IDLE = 0;
+    private static final int V_CHECKING = 1;
+    private static final int V_FAIL = 2;
+    private static final int V_LATEST = 3;
+    private static final int V_NEW = 4;
+
+    /**
      * 活动区的一行。只有「里程碑」进这里 —— 阶段开始、阶段结果、需要用户动手的提示。
      * 子系统的逐条输出（装包每个分片、部署每个文件、体十一项…）只进诊断。
      */
@@ -154,6 +166,11 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
 
     private TextView badge;
     private TextView statusSummary;
+    /** 版本号旁边那颗小符号：检查更新的唯一入口，也是结果的唯一显示位。 */
+    private TextView verDot;
+    private int verState = V_IDLE;
+    private volatile boolean verChecking;
+    private Update.Info verInfo;
     private Glyph.Refresh refresh;
     private TextView activity;
     private TextView scanAt;
@@ -281,6 +298,9 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         line("就绪 · 点「一键全流程」", INFO);
         sweepCaches();
         probe();
+        // 版本检查单独跑：它不碰设备、不占 busy，也不该在活动区留一行版本号。
+        // 让它等界面铺完再发请求，冷启动时的首帧不受网络影响。
+        ui.postDelayed(() -> checkUpdate(false), 600);
     }
 
     @Override
@@ -462,9 +482,35 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         // 长名字拆两行：一行放不下「StepX GApps 安装器」，硬塞会把右边的
         // 主题钮和连接徽标挤扁。上行说平台，下行说装什么。
         titles.addView(Ui.text(this, "StepX GApps", 18.5f, th.text, true));
-        TextView sub = Ui.label(this, "三件套安装器 · v" + verName());
-        sub.setPadding(0, dp(3), 0, 0);
-        titles.addView(sub);
+
+        // 版本号右边那颗小符号就是「检查更新」。状态直接长在它身上
+        // （↑ 有新版 / ✓ 已最新 / ! 取不到），不再额外占一个按钮位。
+        // 贴在这一行是因为它回答的正是「我现在跑的是不是最新的」，离版本号近就不用找。
+        // 字号跟着这行 9.5sp 的等宽小字走，只比它大一点点：早先给过 22dp 的实心圆泡，
+        // 比旁边文字高出一大截，成了整屏最抢眼的东西，喧宾夺主。
+        LinearLayout verRow = new LinearLayout(this);
+        verRow.setOrientation(LinearLayout.HORIZONTAL);
+        verRow.setGravity(Gravity.CENTER_VERTICAL);
+        verRow.addView(Ui.label(this, "三件套安装器 · v" + verName()));
+
+        verDot = Ui.text(this, "", 11, th.sub, true);
+        verDot.setGravity(Gravity.CENTER);
+        verDot.setIncludeFontPadding(false);
+        // 触摸区靠内边距撑，平时不画底：符号本身在视觉上就是一行字的一部分
+        verDot.setPadding(dp(6), dp(4), dp(6), dp(4));
+        verDot.setClickable(true);
+        verDot.setFocusable(true);
+        verDot.setOnClickListener(v -> onVerClick());
+        LinearLayout.LayoutParams vdp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        vdp.setMarginStart(dp(2));
+        verRow.addView(verDot, vdp);
+        paintVer();
+
+        LinearLayout.LayoutParams vrlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        vrlp.topMargin = dp(3);
+        titles.addView(verRow, vrlp);
         bar.addView(titles, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
@@ -1123,6 +1169,191 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         }
     }
 
+    // ------------------------------ 版本检查 / 自我更新 ------------------------------
+
+    /**
+     * 按当前状态给版本号后面那颗符号上色。
+     *
+     * 符号只用 ASCII 边上的几个箭头和标点（↻ … ✓ ↑ !）：emoji 在不同机器上会退化成
+     * 单色豆腐块，而这个位置只有 11sp，退化之后什么信息都不剩。
+     */
+    private void paintVer() {
+        if (verDot == null) return;
+        String sym;
+        int fg;
+        String desc;
+        switch (verState) {
+            case V_CHECKING:
+                sym = "\u2026"; fg = th.sub; desc = "正在检查新版本";
+                break;
+            case V_FAIL:
+                sym = "!"; fg = th.bad; desc = "取不到最新版本，点一下重试";
+                break;
+            case V_LATEST:
+                sym = "\u2713"; fg = th.ok; desc = "已是最新版本";
+                break;
+            case V_NEW:
+                // 有新版是唯一需要用户动手的状态，用主色标出来
+                sym = "\u2191"; fg = th.brand;
+                desc = "有新版本 " + (verInfo == null ? "" : verInfo.tag) + "，点一下下载安装";
+                break;
+            default:
+                sym = "\u21BB"; fg = th.sub; desc = "检查新版本";
+                break;
+        }
+        verDot.setText(sym);
+        verDot.setTextColor(fg);
+        verDot.setBackground(Ui.rippleFlat(th.ripple));
+        verDot.setContentDescription(desc);
+    }
+
+    private void onVerClick() {
+        switch (verState) {
+            case V_NEW:
+                startUpdate();
+                return;
+            case V_LATEST:
+                Toast.makeText(this, "已是最新 v" + verName(), Toast.LENGTH_SHORT).show();
+                checkUpdate(true);
+                return;
+            case V_FAIL:
+                Toast.makeText(this, "重试检查版本", Toast.LENGTH_SHORT).show();
+                checkUpdate(true);
+                return;
+            default:
+                checkUpdate(true);
+        }
+    }
+
+    /**
+     * 查一次最新 Release。
+     *
+     * 不走 runTask：它只是在后台拿一个小 JSON，既不碰设备也不改文件，
+     * 不该把界面锁进「忙」态、更不该在活动区留一行版本号。结果只体现在那颗钮上，
+     * 细节进诊断。
+     *
+     * @param tap 用户点的（而不是启动时自动查）—— 决定要不要再补一个 Toast
+     */
+    private void checkUpdate(boolean tap) {
+        if (verChecking) return;
+        verChecking = true;
+        verState = V_CHECKING;
+        paintVer();
+
+        new Thread(() -> {
+            Update.Info found = null;
+            String why = null;
+            try {
+                found = Update.latest(quiet);
+            } catch (Throwable t) {
+                why = t.getMessage() == null ? t.toString() : t.getMessage();
+            }
+            final Update.Info info = found;
+            final String err = why;
+            runOnUiThread(() -> {
+                // 页面已经走了就别再碰那些 View：自动检查是后台线程，
+                // 用户完全可能在这 8 秒里退出应用。
+                if (isFinishing() || isDestroyed()) return;
+                verChecking = false;
+                if (info == null) {
+                    verInfo = null;
+                    verState = V_FAIL;
+                    paintVer();
+                    detail("检查版本失败 · " + err, INFO);
+                    if (tap) Toast.makeText(this, "取不到最新版本 · 检查网络后再点", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                verInfo = info;
+                boolean has = Update.newer(info.version, verName());
+                verState = has ? V_NEW : V_LATEST;
+                paintVer();
+                detail("检查版本 · 最新 " + info.tag + " · " + (info.proxy ? "加速" : "直连")
+                        + (has ? " · 有新版本" : " · 已是最新"), has ? INFO : OK);
+                if (tap && !has) {
+                    Toast.makeText(this, "已是最新 v" + verName(), Toast.LENGTH_SHORT).show();
+                }
+            });
+        }, "stepx-update-check").start();
+    }
+
+    /**
+     * 下载最新版，然后交给系统安装器。
+     *
+     * 装不装由用户在系统确认页上按下去 —— 这里只负责把包备好并核对来源，
+     * 所以全程不需要 Shizuku。
+     */
+    private void startUpdate() {
+        final Update.Info info = verInfo;
+        if (info == null || verState != V_NEW) return;
+
+        runTask("更新", () -> {
+            long t = System.currentTimeMillis();
+            phase("下载中");
+            File apk;
+            try {
+                apk = Update.download(this, info, loud);
+            } catch (Throwable e) {
+                line("新版没下来 · " + (e.getMessage() == null ? "网络不通" : e.getMessage()), BAD);
+                return;
+            }
+            say("下载", t, Installer.mb(apk.length()), OK);
+
+            // 包名和 versionCode 都在本地开包确认：中转只搬字节，装之前必须自己核对，
+            // 否则「下到的不是本应用」这种事没有任何一层会拦。
+            Installer.Item it = Installer.inspect(apk, "stepx-gapps-installer.apk");
+            if (!getPackageName().equals(it.pkg)) {
+                Update.clear(this);
+                line("下到的包不是本应用 · 已丢弃", BAD);
+                detail("  pkg=" + it.pkg + " 期望 " + getPackageName(), BAD);
+                return;
+            }
+            if (it.versionCode <= parseLong(verCode())) {
+                Update.clear(this);
+                line("下到的版本不比现在新 · 不装", WARN);
+                return;
+            }
+
+            // 系统安装器要先有这个 appop，没开的话它只会丢一句「无法安装」，
+            // 用户不知道该去哪儿开，所以这里先问一句并把人送到那一页。
+            if (!Update.canInstall(this)) {
+                line("系统还没允许本应用安装 · 打开开关后再点一次", WARN);
+                openInstallSetting();
+                return;
+            }
+
+            phase("交给系统安装器");
+            if (Update.handOver(this, apk, loud)) {
+                line("已交给系统安装器 · 点「更新」后才会装", OK);
+            } else {
+                line("打不开系统安装器 · " + Update.lastError, BAD);
+            }
+            // 包不在这里删：安装器还在读它，下次启动统一清 cache/update
+        });
+    }
+
+    /** 打开「安装未知应用」的系统设置页；StepOS 缺页时退回一句手动路径。 */
+    private void openInstallSetting() {
+        try {
+            startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:" + getPackageName())));
+        } catch (Throwable t) {
+            line("设置里也没有这一页 · 手动去 应用 → 特殊权限 → 安装未知应用", WARN);
+        }
+    }
+
+    /** 诊断里那一行：说清楚「查过没、最新是多少、走的哪条路」。 */
+    private String verLine() {
+        switch (verState) {
+            case V_CHECKING: return "检查中";
+            case V_FAIL:     return "取不到最新版本";
+            case V_LATEST:   return "已是最新" + (verInfo == null ? "" : "（" + verInfo.tag + "）");
+            case V_NEW:      return verInfo == null ? "有新版"
+                    : "有新版 " + verInfo.tag + " · " + Installer.mb(verInfo.size)
+                    + " · " + (verInfo.proxy ? "加速" : "直连");
+            default:         return "没查过";
+        }
+    }
+
     // ------------------------------ 活动 / 诊断 ------------------------------
 
     /**
@@ -1385,6 +1616,7 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         b.append("\n==== 应用 ====\n");
         b.append("包名     ").append(getPackageName()).append('\n');
         b.append("版本     ").append(verName()).append(" (versionCode ").append(verCode()).append(")\n");
+        b.append("更新     ").append(verLine()).append('\n');
         b.append("主题     ").append(themeName()).append('\n');
         b.append("语言     ").append(Locale.getDefault())
                 .append("    时区 ").append(java.util.TimeZone.getDefault().getID()).append('\n');
@@ -2189,7 +2421,8 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
     }
 
     /**
-     * 启动时清掉上一轮遗留的临时文件：在线下的三个包 + 选包时拷进来的副本。
+     * 启动时清掉上一轮遗留的临时文件：在线下的三个包、选包时拷进来的副本、
+     * 以及下到一半的新版 apk。
      *
      * 场景很具体：点「在线获取」下 133MB、落 275.8MB，或者选了三个包拷进 cache，
      * 还没装就退出了 / 装到一半被杀掉。进程一死 items 就没了，缓存里的文件
@@ -2204,10 +2437,11 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
             File cache = getCacheDir();
             File trio = new File(cache, Trio.DIR);
             File picked = new File(cache, "apk");
-            long was = dirSize(trio) + dirSize(picked);
+            File update = new File(cache, "update");
+            long was = dirSize(trio) + dirSize(picked) + dirSize(update);
             if (was <= 0) return;
 
-            long freed = Trio.clear(this) + ApkImport.clear(picked);
+            long freed = Trio.clear(this) + ApkImport.clear(picked) + Update.clear(this);
             swept = freed;
             runOnUiThread(() -> {
                 if (freed > 0) {

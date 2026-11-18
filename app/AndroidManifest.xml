@@ -4,6 +4,11 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
+    <!--
+      检查更新后把新包交给系统安装器，需要有这个 appop 才被允许发起安装。
+      装不装由用户在系统确认页决定；这一步用不上 Shizuku。
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:label="GApps 安装器"
@@ -32,5 +37,15 @@
             android:exported="true"
             android:multiprocess="false"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
+        <!--
+          下载好的新包通过它交给系统安装器：file:// 会被安装器拒收，
+          只能是 content://。不导出，靠 FLAG_GRANT_READ_URI_PERMISSION 逐次授权。
+        -->
+        <provider
+            android:name=".ApkProvider"
+            android:authorities="com.stepx.gapps.installer.apk"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 </manifest>

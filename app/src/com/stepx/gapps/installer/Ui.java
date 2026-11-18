@@ -8,6 +8,7 @@ import android.graphics.RadialGradient;
 import android.graphics.Rect;
 import android.graphics.Shader;
 import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
@@ -148,6 +149,15 @@ final class Ui {
 
     static RippleDrawable ripple(GradientDrawable content, int rippleColor) {
         return new RippleDrawable(ColorStateList.valueOf(rippleColor), content, null);
+    }
+
+    /**
+     * 只有按下涟漪、平时完全透明：给「不画底色的可点文字/符号」用。
+     * content 传 null 时不画常态底色，遮罩用一块整幅白，涟漪仍被裁在视图内。
+     */
+    static RippleDrawable rippleFlat(int rippleColor) {
+        return new RippleDrawable(ColorStateList.valueOf(rippleColor), null,
+                new ColorDrawable(0xFFFFFFFF));
     }
 
     /**
