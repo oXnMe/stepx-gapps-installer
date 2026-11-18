@@ -28,7 +28,7 @@ STOCK = BIN + '/ubuntu_zygote.stepx-stock'
 LEGACY = BIN + '/ubuntu_zygote.stepx-stock-20261021'
 STAGE = '/tmp/stepx-deploy'
 OUT = STAGE + '/out.txt'
-VERSION = '0.7'
+VERSION = '0.8'
 
 FILES = [
     ('boot.py', LIB + '/boot.py', 0o644),

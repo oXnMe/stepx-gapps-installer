@@ -96,6 +96,8 @@ Shizuku 的 `api` / `provider` 两个 aar 首次运行自动下到 `.deps/`。
 - 解禁要等注入跑起来。注入硬超时或载荷缺失时三件套仍是禁用态，只能在面板点一次「恢复三件套」（回装，约 2 分钟）。
 - GMS 偶尔因 `Not the approved domain verification agent` 掉一次进程（数小时一次），自行恢复。
 - 认证修补只改 Play 的本地拦截清单：搜索、Play Pass、结账仍会被服务端拒绝；Play 清数据或服务端刷回之后要重新修补（`CERT` 红了就补）。
+- 点 Play 的账号管理页、Gemini 的「屏幕上的内容」会闪退：两处分别跳 `SYNC_SETTINGS` 和 `VOICE_INPUT_SETTINGS`，StepOS 的 Settings 没有这两页，抛 `ActivityNotFoundException`。
+- 第三方应用调 Google 账号快捷登录，登录弹窗不出来：Credential Manager 只认系统分区的 GMS，本工具的 GMS 在 `/data/app`。
 
 ## 许可
 

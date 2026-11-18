@@ -7,6 +7,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 认证拦截修补（play scope）。
@@ -90,6 +92,8 @@ final class CertFix {
             r.line("布置失败：" + (text == null ? "没有拿到结果" : first(text)), Reporter.BAD);
             return false;
         }
+        // 标记落盘的时刻，用来把这一轮的报告和上一轮留在盘上的分清楚（留 2 秒余量）
+        long startedAt = System.currentTimeMillis() / 1000L - 2;
 
         // 重启容器会让网关跟着断一下：这是预期，不是错误，所以只看返回码不判失败
         r.line("  重启容器开窗口（网关会断十几秒）", Reporter.INFO);
@@ -97,7 +101,7 @@ final class CertFix {
                 "python3 " + Deploy.LIB + "/recover.py"}, 45000, 50);
 
         r.line("  等开机窗口执行（约 40 秒）", Reporter.INFO);
-        String out = waitResult(gw);
+        String out = waitResult(gw, startedAt);
         if (out == null) {
             r.line("等了 " + WAIT_SEC + " 秒还没拿到结果。", Reporter.BAD);
             r.line("→ 诊断里看 repair.log 与 last.json；" + (rollback
@@ -110,7 +114,7 @@ final class CertFix {
 
     // ------------------------------- 内部 -------------------------------
 
-    private static String waitResult(Gateway gw) {
+    private static String waitResult(Gateway gw, long startedAt) {
         long deadline = System.currentTimeMillis() + WAIT_SEC * 1000L;
         while (System.currentTimeMillis() < deadline) {
             if (Thread.currentThread().isInterrupted()) return null;
@@ -120,9 +124,27 @@ final class CertFix {
             if (!alive.ok()) continue;
             String out = root(gw, Payload.READ_COMPAT, 45);
             if (out == null) continue;
-            if (out.contains("RESULT ok") || out.contains("status failed")) return out;
+            // 判据是「这一轮的报告拿回来了没」，不是「补丁成没成」：
+            //   · status 还是 started（容器刚起、载荷没跑完）时会落 RESULT fail，
+            //     那只是还没到时候，不能当成结论；
+            //   · 上一轮的记录也留在盘上（同样是 status compat + report_ok），
+            //     拿它当结果会在大约 17 秒就「完成」，等于什么都没验证。
+            // 所以认两件事：有 report_ok 行（真报告），且 unix_time 是这一轮写的。
+            if (out.contains("status failed") && fresh(out, startedAt)) return out;
+            if (out.contains("report_ok ") && fresh(out, startedAt)) return out;
         }
         return null;
+    }
+
+    /** 报告是不是本轮写的：盘上的 last.json 会同时留着上一轮的 compat 记录。 */
+    private static boolean fresh(String out, long startedAt) {
+        Matcher m = Pattern.compile("(?m)^unix_time (\\d+)$").matcher(out);
+        if (!m.find()) return false;
+        try {
+            return Long.parseLong(m.group(1)) + 2 >= startedAt;
+        } catch (NumberFormatException ignored) {
+            return false;
+        }
     }
 
     /** 跑一个 root 侧脚本并等 out.txt：clearOut → apt 钩子 → 轮询读回。 */
@@ -175,10 +197,16 @@ final class CertFix {
                 r.line("没有可回滚的记录 · 没打过补丁，或已经回滚过", Reporter.OK);
                 return true;
             }
+            // 两次改动是分开落盘的：cache 先，数据库后。数据库这步失败时 cache
+            // 已经改完，拦截可能已经解除 —— 这时候说「Play 仍是原样」是错的。
+            for (String name : changed) r.line("改 cache · " + name, Reporter.OK);
             r.line((rollback ? "回滚没跑成：" : "补丁没打上：") + why, Reporter.BAD);
             r.line(rollback
                     ? "→ 补丁仍在，Play 表现不变。要再试一次就再点一遍回滚。"
-                    : "→ Play 仍是原样，不影响使用。要再试一次就再点一遍修补。", Reporter.WARN);
+                    : (changed.isEmpty()
+                        ? "→ Play 仍是原样，不影响使用。要再试一次就再点一遍修补。"
+                        : "→ cache 已清空，拦截眼下不会出现；数据库那步没成，Play 重新拉清单后还会写回来。"),
+                    Reporter.WARN);
             return false;
         }
 

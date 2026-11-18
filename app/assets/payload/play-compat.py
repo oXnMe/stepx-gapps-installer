@@ -223,8 +223,12 @@ def read_plan(con):
         raise ValueError('ambiguous override rows')
     if cands:
         row = cands[0]
+        # account_id=0 是全局作用域：Play 自己维护的那条就落在 0 上，覆盖所有账号，
+        # 比账号级更宽，目的照样达成。只认当前账号会把它判成「作用域不符」，
+        # 结果文件侧都清完了，db 侧却抛错退出。
         if not (row['config_package_id'] == config['config_package_id']
-                and row['config_package_name'] is None and row['account_id'] == account
+                and row['config_package_name'] is None
+                and row['account_id'] in (account, 0)
                 and row['active'] == 1 and row['type'] == 5 and isinstance(row['value'], bytes)):
             raise ValueError('existing override not scoped to committed account')
         plan['override'] = row
