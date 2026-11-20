@@ -3,6 +3,16 @@
 发版时 `.github/workflows/build.yml` 会按 tag 名从这里取对应小节当作 Release 正文，
 取不到就回落到一段通用说明。新增版本在文件顶部追加，标题保持 `## vX.Y` 一行。
 
+## v0.36
+
+**修正**
+
+- 「注入」的跳过条件补上版本维度：`stepx-fix.state` 记的 GMS versionCode 与当前不一致时走完整注入，
+  不再因权限还挂着就跳过。
+- GMS 换版、或权限本轮刚补齐之后重启 GMS，让 people 等按需模块重新注册。
+- README 已知限制里 `Not the approved domain verification agent` 一条改准：出现在补完权限后
+  立刻冷启动，不是随机掉进程。
+
 ## v0.35
 
 版本号旁加了检查更新，有新版可下载并交系统安装器安装。

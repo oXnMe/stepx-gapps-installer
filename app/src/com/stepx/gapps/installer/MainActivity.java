@@ -2339,7 +2339,10 @@ public class MainActivity extends Activity implements Reporter, Diag.Host {
         boolean injected = false;
         t = System.currentTimeMillis();
         phase("注入中");
-        if (st.permPlay && st.permGms && st.gmsAlive) {
+        // 跳过条件必须带上版本：GMS 被 Play 换成新版后，权限可能还挂着，
+        // 但进程里的按需模块已经注册失败。只看「权限在 + 进程活」会跳过，
+        // 面板全绿而 Play 里 people 照样坏。
+        if (st.permPlay && st.permGms && st.gmsAlive && !SelfHeal.gmsVersionChanged(sh, st)) {
             say("注入", t, "跳过 · 权限已就位", OK);
         } else {
             int rc = SelfHeal.repair(sh, gw, quiet);

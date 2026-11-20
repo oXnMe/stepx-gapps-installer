@@ -94,7 +94,7 @@ Shizuku 的 `api` / `provider` 两个 aar 首次运行自动下到 `.deps/`。
 - 只支持 StepX Neo（PZ261A）；OTA 后哈希与偏移会变，自检会拦住。
 - 注入改的是内存态，重启即失效；开机脚本会补特权权限，OTA 后要重新部署。
 - 解禁要等注入跑起来。注入硬超时或载荷缺失时三件套仍是禁用态，只能在面板点一次「恢复三件套」（回装，约 2 分钟）。
-- GMS 偶尔因 `Not the approved domain verification agent` 掉一次进程（数小时一次），自行恢复。
+- 补完权限后立刻冷启动 GMS，有概率先掉一次进程（`Not the approved domain verification agent`），约 30 秒自行恢复；单独冷启动不复现。
 - 认证修补只改 Play 的本地拦截清单：搜索、Play Pass、结账仍会被服务端拒绝；Play 清数据或服务端刷回之后要重新修补（`CERT` 红了就补）。
 - 点 Play 的账号管理页、Gemini 的「屏幕上的内容」会闪退：两处分别跳 `SYNC_SETTINGS` 和 `VOICE_INPUT_SETTINGS`，StepOS 的 Settings 没有这两页，抛 `ActivityNotFoundException`。
 - 第三方应用调 Google 账号快捷登录，登录弹窗不出来：Credential Manager 只认系统分区的 GMS，本工具的 GMS 在 `/data/app`。

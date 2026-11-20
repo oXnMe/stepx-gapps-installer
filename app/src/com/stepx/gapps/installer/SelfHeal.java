@@ -265,6 +265,7 @@ final class SelfHeal {
 
         // --- 版本记账：GMS / Play 一更新就无条件强制重注入 ---
         boolean force = false;
+        boolean gmsVerChanged = false;
         long gv = st.gmsVer;
         long pv = st.playVer;
         String prev = readState(sh);
@@ -281,6 +282,7 @@ final class SelfHeal {
                 r.line("→ 权限会被 PMS 重算，认证补丁也可能被服务端刷回，按强制重注入处理。",
                         Reporter.WARN);
                 force = true;
+                gmsVerChanged = p[0] != gv;
             }
         }
 
@@ -318,18 +320,32 @@ final class SelfHeal {
         if (!fixAppOps(sh, GMS, st.fgsGms, st.pwrGms, r)) fail = true;
 
         // --- 重注入 ---
+        boolean permRepaired = false;
         if (need) {
+            boolean gmsHadPerm = st.permGms;
             if (!recoverPerm(sh, gw, r)) fail = true;
             st = snapshot(sh);
+            permRepaired = !gmsHadPerm && st.permGms;
         }
 
-        // --- B/C. GMS 幽灵态 / binder 全死 ---
+        // --- B/C/D. GMS 幽灵态 / binder 全死 / 权限本轮刚补 ---
         if (!fail) {
             if (!st.gmsAlive) {
                 r.line("GMS 进程不在，开始重启 GMS...", Reporter.STEP);
                 gmsRestart(sh, r);
             } else if (st.dead > 10) {
                 r.line("GMS binder 已大面积失效（" + st.dead + " 条 DEAD），开始重启 GMS...", Reporter.STEP);
+                gmsRestart(sh, r);
+            } else if (permRepaired || gmsVerChanged) {
+                // 补进 PMS 的权限，运行中的进程不会重新装配：GMS 的按需模块（people 等）
+                // 在进程启动时注册，当时没权限就注册失败，这个失败结果跟着进程一直缓存。
+                // 只补权限不重启的结局是「面板从 11/12 变绿、Play 里照样
+                // People.API_1P SERVICE_INVALID」——头像空、Play Pass 坏、Games 登不上。
+                // 换版同理：包被替换后模块状态要按新包的权限重新建立。
+                r.line(permRepaired
+                                ? "权限本轮刚补齐，GMS 进程内模块还是旧状态，重启 GMS 重新注册"
+                                : "GMS 刚换版，进程内模块要按新包重建，重启 GMS",
+                        Reporter.STEP);
                 gmsRestart(sh, r);
             }
         }
@@ -585,6 +601,22 @@ final class SelfHeal {
     }
 
     // --------------------------------- 小工具 --------------------------------
+
+    /**
+     * GMS 版本和上次记账对不上。
+     *
+     * 「注入」按钮原来只看「权限在 + 进程活」就跳过，漏掉了版本这一维：
+     * GMS 被 Play 换成新版之后，如果权限碰巧还挂着，点注入会直接跳过一次、
+     * 什么都不做，而 Play 里 people 模块其实是坏的。这里单独给一条判据，
+     * 让换版时至少走一遍 repair（repair 内部会重注入并重启 GMS）。
+     */
+    static boolean gmsVersionChanged(Shell sh, Status st) {
+        if (st.gmsVer <= 0) return false;
+        String prev = readState(sh);
+        if (prev == null) return false;          // 首次运行还没记账，交给 repair 自己去写
+        long[] p = parseState(prev);
+        return p != null && p[0] != st.gmsVer;
+    }
 
     static boolean gmsAlive(Shell sh) {
         return !sh.exec("pidof " + GMS + " 2>/dev/null", 20).stdout().isEmpty();
