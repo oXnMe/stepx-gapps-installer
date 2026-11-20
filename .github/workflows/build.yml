@@ -54,6 +54,15 @@ jobs:
           KS_ALIAS: ${{ secrets.KS_ALIAS }}
         run: |
           chmod +x build.sh
+          # 版本号只认 tag：v0.36 → versionName 0.36 / versionCode 36。
+          # 以前靠手改 build.sh 的默认值，漏改一次就把上一个版本号的包发出去，
+          # 而 versionCode 没涨的包既盖不掉已装版本，也不会被「检查更新」判为有新版本。
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            VERSION_NAME="${GITHUB_REF_NAME#v}"
+            VERSION_CODE=$(echo "$VERSION_NAME" | awk -F. '{printf "%d", $1 * 100 + $2}')
+            export VERSION_NAME VERSION_CODE
+            echo "tag 构建：versionCode=$VERSION_CODE versionName=$VERSION_NAME"
+          fi
           ./build.sh
 
       - name: Show result

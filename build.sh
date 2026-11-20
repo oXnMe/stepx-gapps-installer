@@ -7,7 +7,7 @@
 # 用法：
 #   ./build.sh                 出 out/stepx-gapps-installer.apk
 #   ./build.sh --install       构建完顺手装到连着的设备（走 pm install-create）
-#   VERSION_CODE=35 VERSION_NAME=0.35 ./build.sh
+#   VERSION_CODE=36 VERSION_NAME=0.36 ./build.sh
 #
 # 签名 key 不在仓库里：默认读 keystore/release.jks + keystore/pass（都被忽略），
 # 也可以用 KS_FILE / KS_PASS / KS_KEYPASS 指过去；都没有就生成临时 key 出包。
@@ -23,8 +23,10 @@ OUT=$HERE/out
 BUILD=${TMPDIR:-/tmp}/stepx-gapps-build
 DEPS=$HERE/.deps
 
-VERSION_CODE=${VERSION_CODE:-35}
-VERSION_NAME=${VERSION_NAME:-0.35}
+# 默认值只在「本地随手构建」时用；发版由 CI 从 tag 解析后覆盖（见 .github/workflows/build.yml），
+# 不要靠改这两行来发版 —— 以前就是这么干的，忘一次就会打出上一个版本号的包。
+VERSION_CODE=${VERSION_CODE:-36}
+VERSION_NAME=${VERSION_NAME:-0.36}
 
 # 签名：key 不进仓库。公开的 key 等于谁都能签出一个「同包名、同签名」的包，
 # 装到已装过的机器上就是一次静默覆盖升级，所以这里只认外面给的路径：
